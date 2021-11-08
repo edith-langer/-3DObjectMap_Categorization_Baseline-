@@ -60,7 +60,7 @@ std::string extractSceneName(std::string path) {
     return path.substr(last_of+1, path.size()-1);
 }
 
-std::map<std::string, std::vector<DetObject> > readObjMap(std::string path);
+std::map<std::string, std::vector<DetObject> > readObjResultFile(std::string path);
 CompResult compareScenes(std::map<std::string, std::vector<DetObject> > ref_objects, std::map<std::string, std::vector<DetObject> > curr_objects, std::string ref_result_path, std::string curr_res_path);
 std::vector<std::tuple<DetObject, DetObject>> computeObjSimilarity(std::vector<DetObject> ref_obj_vec, std::vector<DetObject> curr_obj_vec, std::string ref_result_path, std::string curr_result_path);
 std::vector<std::vector<float>> readFeatureVectors(std::string label, std::string fv_result_path);
@@ -99,21 +99,23 @@ int main(int argc, char** argv)
             std::string ref_scene_name = extractSceneName(reference_path);
             std::string curr_scene_name = extractSceneName(current_path);
 
+            std::cout << "Comparing " << ref_scene_name << " - " << curr_scene_name << std::endl;
+
             std::string result_path = base_result_path + "/" + ref_scene_name + "-" + curr_scene_name + "/";
             boost::filesystem::create_directories(result_path);
 
             std::string ref_obj_map_path = reference_path + obj_map_path_postfix;
             std::string curr_obj_map_path = current_path + obj_map_path_postfix;
 
-            std::map<std::string, std::vector<DetObject>> ref_objects = readObjMap(ref_obj_map_path);
-            std::map<std::string, std::vector<DetObject>> curr_objects = readObjMap(curr_obj_map_path);
+            std::map<std::string, std::vector<DetObject>> ref_objects = readObjResultFile(ref_obj_map_path);
+            std::map<std::string, std::vector<DetObject>> curr_objects = readObjResultFile(curr_obj_map_path);
 
             CompResult result = compareScenes(ref_objects, curr_objects, boost::filesystem::path(ref_obj_map_path).parent_path().string(), boost::filesystem::path(curr_obj_map_path).parent_path().string());
 
             //write result to files
             if (result.rem_obj.size() > 0) {
                 std::ofstream rem_obj_file;
-                rem_obj_file.open(result_path + "/rem_objects.txt");
+                rem_obj_file.open(result_path + "/ref_removed_objects.txt");
                 for (DetObject obj : result.rem_obj) {
                     rem_obj_file << "[" << obj.position.x << "," << obj.position.y << "," << obj.position.z << "]" << ";" << obj.label << "\n";
                 }
@@ -121,7 +123,7 @@ int main(int argc, char** argv)
             }
             if (result.new_obj.size() > 0) {
                 std::ofstream new_obj_file;
-                new_obj_file.open(result_path + "/new_objects.txt");
+                new_obj_file.open(result_path + "/curr_new_objects.txt");
                 for (DetObject obj : result.new_obj) {
                     new_obj_file << "[" << obj.position.x << "," << obj.position.y << "," << obj.position.z << "]" << ";" << obj.label << "\n";
                 }
@@ -138,7 +140,7 @@ int main(int argc, char** argv)
             if (result.curr_displaced_obj.size() > 0) {
                 std::ofstream curr_displ_obj_file;
                 curr_displ_obj_file.open(result_path + "/curr_displaced_objects.txt");
-                for (DetObject obj : result.ref_displaced_obj) {
+                for (DetObject obj : result.curr_displaced_obj) {
                     curr_displ_obj_file << "[" << obj.position.x << "," << obj.position.y << "," << obj.position.z << "]" << ";" << obj.label << "\n";
                 }
                 curr_displ_obj_file.close();
@@ -181,6 +183,7 @@ CompResult compareScenes(std::map<std::string, std::vector<DetObject>> ref_objec
         if (curr_it == curr_objects.end()) {
             //no object with the same label found --> removed
             result.rem_obj.insert(result.rem_obj.end(), ref_it->second.begin(), ref_it->second.end());
+            ref_it->second.clear();
         } else {
             //is there exactly one object of the class in ref and curr scene?
             if (ref_it->second.size() == 1 && curr_it->second.size() == 1) {
@@ -194,44 +197,51 @@ CompResult compareScenes(std::map<std::string, std::vector<DetObject>> ref_objec
                     result.ref_displaced_obj.push_back(ref_it->second[0]);
                 }
                 result.obj_ass.push_back(std::make_tuple(ref_it->second[0].label, curr_it->second[0].label));
-            }
-            //several objects with the same class, find association via feature vectors
-            std::vector<std::tuple<DetObject, DetObject>> obj_ass =  computeObjSimilarity(ref_it->second, curr_it->second, ref_result_path, curr_res_path);
-            for (std::tuple<DetObject, DetObject> ass : obj_ass) {
-                float squared_dist = squaredEuclideanDistance(std::get<0>(ass).position, std::get<1>(ass).position);
-                if (std::sqrt(squared_dist) < max_dist_for_being_static) {
-                    result.curr_static_obj.push_back(std::get<1>(ass));
-                    result.ref_static_obj.push_back(std::get<0>(ass));
-                } else {
-                    result.curr_displaced_obj.push_back(std::get<1>(ass));
-                    result.ref_displaced_obj.push_back(std::get<0>(ass));
-                }
-                result.obj_ass.push_back(std::make_tuple(std::get<0>(ass).label, std::get<1>(ass).label));
 
-                //remove the matched objects from the maps
                 auto & ref_obj_vec = ref_it->second;
-                std::string ref_label = std::get<0>(ass).label;
-                ref_obj_vec.erase(std::remove_if(ref_obj_vec.begin(), ref_obj_vec.end(), [&ref_label](const DetObject &obj) { return obj.label == ref_label; }), ref_obj_vec.end());
-
                 auto & curr_obj_vec = curr_it->second;
-                std::string curr_label = std::get<1>(ass).label;
+                std::string ref_label = ref_it->second[0].label;
+                std::string curr_label = curr_it->second[0].label;
+                ref_obj_vec.erase(std::remove_if(ref_obj_vec.begin(), ref_obj_vec.end(), [&ref_label](const DetObject &obj) { return obj.label == ref_label; }), ref_obj_vec.end());
                 curr_obj_vec.erase(std::remove_if(curr_obj_vec.begin(), curr_obj_vec.end(), [&curr_label](const DetObject &obj) { return obj.label == curr_label; }), curr_obj_vec.end());
+            }
+            else {
+                //several objects with the same class, find association via feature vectors
+                std::vector<std::tuple<DetObject, DetObject>> obj_ass =  computeObjSimilarity(ref_it->second, curr_it->second, ref_result_path, curr_res_path);
+                for (std::tuple<DetObject, DetObject> ass : obj_ass) {
+                    float squared_dist = squaredEuclideanDistance(std::get<0>(ass).position, std::get<1>(ass).position);
+                    if (std::sqrt(squared_dist) < max_dist_for_being_static) {
+                        result.curr_static_obj.push_back(std::get<1>(ass));
+                        result.ref_static_obj.push_back(std::get<0>(ass));
+                    } else {
+                        result.curr_displaced_obj.push_back(std::get<1>(ass));
+                        result.ref_displaced_obj.push_back(std::get<0>(ass));
+                    }
+                    result.obj_ass.push_back(std::make_tuple(std::get<0>(ass).label, std::get<1>(ass).label));
 
+                    //remove the matched objects from the maps
+                    auto & ref_obj_vec = ref_it->second;
+                    std::string ref_label = std::get<0>(ass).label;
+                    ref_obj_vec.erase(std::remove_if(ref_obj_vec.begin(), ref_obj_vec.end(), [&ref_label](const DetObject &obj) { return obj.label == ref_label; }), ref_obj_vec.end());
+
+                    auto & curr_obj_vec = curr_it->second;
+                    std::string curr_label = std::get<1>(ass).label;
+                    curr_obj_vec.erase(std::remove_if(curr_obj_vec.begin(), curr_obj_vec.end(), [&curr_label](const DetObject &obj) { return obj.label == curr_label; }), curr_obj_vec.end());
+                }
             }
         }
     }
 
-     //now handle all objects from a class where not match was found (they are either new or removed)
+    //now handle all objects from a class where not match was found (they are either new or removed)
     for (ref_it = ref_objects.begin(); ref_it != ref_objects.end(); ref_it++) {
         result.rem_obj.insert(result.rem_obj.end(), ref_it->second.begin(), ref_it->second.end());
     }
 
     std::map<std::string, std::vector<DetObject>>::iterator curr_it;
     for (curr_it = curr_objects.begin(); curr_it != curr_objects.end(); curr_it++) {
-        if (ref_objects.find(curr_it->first) == ref_objects.end()) {
-            //no object with the same label found --> new
-            result.new_obj.insert(result.new_obj.end(), curr_it->second.begin(), curr_it->second.end());
-        }
+        //no object with the same label found --> new
+        result.new_obj.insert(result.new_obj.end(), curr_it->second.begin(), curr_it->second.end());
+
     }
     return result;
 }
@@ -279,6 +289,9 @@ std::vector<std::tuple<DetObject, DetObject>> computeObjSimilarity(std::vector<D
 
         obj_associations.push_back(std::make_tuple(ref_obj, curr_obj));
         curr_obj_fv_map.erase(curr_best_label);
+
+        if (curr_obj_fv_map.size() == 0)
+            return obj_associations;
     }
 
     return obj_associations;
@@ -316,19 +329,21 @@ std::vector<std::vector<float>> readFeatureVectors(std::string label, std::strin
     while (std::getline(fv_paths_ifs, line)){
         std::ifstream fv_ifs(line);
         if (fv_ifs) {
+            std::getline(fv_ifs, line);
+            line = line.substr(1, line.size() - 2); //remove first and last chars ([ and ])
+            std::vector<std::string> split_result;
+            boost::split(split_result, line, boost::is_any_of(", "), boost::token_compress_on);
             std::vector<float> fv_vec;
-            float value;
-            // read the elements in the file into a vector
-            while ( fv_ifs >> value ) {
-                fv_vec.push_back(value);
-            }
+            for (std::string s : split_result)
+                fv_vec.push_back(std::stof(s));
+
             ref_fv.push_back(fv_vec);
         }
     }
     return ref_fv;
 }
 
-std::map<std::string, std::vector<DetObject>> readObjMap(std::string path) {
+std::map<std::string, std::vector<DetObject>> readObjResultFile(std::string path) {
     std::map<std::string, std::vector<DetObject>> obj_map;
     std::ifstream ifs(path.c_str());
     std::string line;
