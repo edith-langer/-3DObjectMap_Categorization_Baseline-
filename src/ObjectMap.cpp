@@ -389,17 +389,17 @@ int main(int argc, char** argv)
             std::string label = detection["label"].get<std::string>();
             float score = std::stof(detection["score"].get<std::string>());
             auto bb = detection["bb"];
-            int minX = bb["minX"].get<int>();
-            int minY = bb["minY"].get<int>();
-            int maxX = bb["maxX"].get<int>();
-            int maxY = bb["maxY"].get<int>();
+            int minX = bb["minY"].get<int>();
+            int minY = bb["minX"].get<int>();
+            int maxX = bb["maxY"].get<int>();
+            int maxY = bb["maxX"].get<int>();
 
             //if detection is not in the list of valid classes, we reject it
             if (std::find(classes.begin(), classes.end(), label) == classes.end())
                 continue;
 
             //if score is less than conf, we reject the detection
-            if (score < 0.7)
+            if (score < 0.9)
                 continue;
 
 
@@ -467,7 +467,7 @@ int main(int argc, char** argv)
     float aTh = 0.2; //0.3
 
     // real world distance threshold in meters
-    float dTh = 0.8; // 1.0
+    float dTh = 0.3;//0.8; // 1.0
     //float dTh = 7; // 1.0
 
 
@@ -589,6 +589,8 @@ int main(int argc, char** argv)
         //it2++;
         input_it++;
     }
+
+
 
     std::chrono::steady_clock::time_point end_temp = std::chrono::steady_clock::now();
     //std::cout << "Time difference temporal association = " <<
