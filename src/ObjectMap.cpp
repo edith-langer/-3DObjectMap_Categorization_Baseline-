@@ -428,10 +428,10 @@ int main(int argc, char** argv)
                             std::string label = detection["label"].get<std::string>();
                             float score = std::stof(detection["score"].get<std::string>());
                             auto bb = detection["bb"];
-                            int minX = bb["minY"].get<int>();
-                            int minY = bb["minX"].get<int>();
-                            int maxX = bb["maxY"].get<int>();
-                            int maxY = bb["maxX"].get<int>();
+                            int minX = bb["minX"].get<int>();
+                            int minY = bb["minY"].get<int>();
+                            int maxX = bb["maxX"].get<int>();
+                            int maxY = bb["maxY"].get<int>();
 
                             //if detection is not in the list of valid classes, we reject it
                             if (std::find(classes.begin(), classes.end(), label) == classes.end())
