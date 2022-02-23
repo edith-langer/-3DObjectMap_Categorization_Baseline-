@@ -46,9 +46,16 @@ std::string r_static_obj_name = "ref_static_objects.txt";
 
 std::string obj_ass_name = "obj_associations.txt";
 
+std::string ycbv_class_file="/home/edith/Projects/SpatioTemporal3DObject_Baseline/YCBV_valid_classes.txt";
+
+std::vector<std::string> rooms = {"GH30_office", "GH30_living", "GH30_kitchen", "Arena", "KennyLab"};
+
+//CHANGE HERE
+bool ycbv_eval=true;
+std::string prefix_input = "/home/edith/liebnas_mnt/ResultBaseline/YCB_fv1/";
+std::string prefix_anno = "/home/edith/liebnas_mnt/PlaneReconstructions/Annotations/";
 
 //we also need the correspondences for static/moved objects
-//NEW = 0; REMOVED = 10; STATIC = [20,30,...950], MOVED = [1000, 1010,...1950]
 enum ObjectClass {NEW = 0, REMOVED=1, UNKNOWN=2}; // STATIC = [20,30,...950], MOVED = [1000, 1010,...1950] - weird int assignment is better for visualization
 
 struct SceneCompInfo {
@@ -107,12 +114,21 @@ float computeMeanPointDistance(pcl::PointCloud<PointLabel>::Ptr ref_object, pcl:
 void addObjectsToCloud(pcl::PointCloud<PointLabel>::Ptr cloud, std::vector<DetObject> objects);
 void mergeObjectIntoMap (std::map<std::string, int> & global_map, std::string local_vec);
 
+std::vector<DetObject> checkNovelObjects(GTCloudsAndNumbers gt_cloud_numbers, std::vector<DetObject> det_object_vec, Measurements &result, Measurements &FP_results, std::map<std::string, int> &tp_class_object_count);
+std::vector<DetObject> checkRemovedObjects(GTCloudsAndNumbers gt_cloud_numbers, std::vector<DetObject> det_object_vec, Measurements &result, Measurements &FP_results, std::map<std::string, int> &tp_class_object_count);
+std::vector<AssociatedObjects> checkDisplacedObjects(GTCloudsAndNumbers gt_cloud_numbers, std::vector<AssociatedObjects> det_moved_associations,
+                                                     Measurements &result, Measurements &FP_results, std::map<std::string, int> &tp_class_object_count);
+void checkStaticObjects(GTCloudsAndNumbers gt_cloud_numbers, std::vector<AssociatedObjects> det_static_associations,
+                        std::vector<DetObject> gt_rem_new_objects, std::vector<DetObject> gt_rem_removed_objects, std::vector<AssociatedObjects> gt_rem_displaced_objects,
+                        Measurements &result, Measurements &FP_results, std::map<std::string, int> &tp_class_object_count);
+
 int getMostFrequentNumber(std::vector<int> v);
 void writeSumResultsToFile(std::vector<Measurements> all_gt_results, std::vector<Measurements> all_tp_results, std::vector<Measurements> all_fp_results, std::string path);
 void writeObjectSummaryToFile(std::map<std::string, int> & gt_obj_count, std::map<std::string, int> & det_obj_count, std::map<std::string, int> &tp_class_obj_count, std::vector<Measurements> &all_fp_results, std::string path);
 pcl::PointCloud<PointLabel>::Ptr downsampleCloud(pcl::PointCloud<PointLabel>::Ptr input, double leafSize);
 GTCloudsAndNumbers createGTforSceneComp(const std::map<std::string, std::map<std::string, pcl::PointCloud<PointLabel>::Ptr> > scene_annotations_map,
                                         const SceneCompInfo &scene_comp);
+bool isYCBVObject(std::vector<std::string> ycbv_classes, std::string obj_name);
 
 std::ostream& operator<<(std::ostream& output, Measurements const& m)
 {
@@ -181,502 +197,389 @@ PointXYZ computeMeanPoint(pcl::PointCloud<PointLabel>::Ptr cloud) {
 int main(int argc, char* argv[])
 {
     /// Check arguments and print info
-    if (argc < 3) {
-        pcl::console::print_info("\n\
-                                 -- Evaluation of change detection between two scenes -- : \n\
-                                 \n\
-                                 Syntax: %s result_folder annotation_folder \n\
-                                 e.g. /home/edith/Results/Arena/ /home/edith/Annotations/Arena/",
-                                 argv[0]);
-        return(1);
-    }
+//    if (argc < 3) {
+//        pcl::console::print_info("\n\
+//                                 -- Evaluation of change detection between two scenes -- : \n\
+//                                 \n\
+//                                 Syntax: %s result_folder annotation_folder \n\
+//                                 e.g. /home/edith/Results/Arena/ /home/edith/Annotations/Arena/",
+//                                 argv[0]);
+//        return(1);
+//    }
 
-    /// Parse command line arguments
-    std::string result_path = argv[1];
-    std::string annotation_path = argv[2];
+//    /// Parse command line arguments
+//    std::string result_path = argv[1];
+//    std::string annotation_path = argv[2];
 
-    if (!boost::filesystem::exists(result_path) || !boost::filesystem::is_directory(result_path)) {
-        std::cerr << "Result folder does not exist " << result_path << std::endl;
-    }
-    if (!boost::filesystem::exists(annotation_path) || !boost::filesystem::is_directory(annotation_path)) {
-        std::cerr << "Annotation folder does not exist " << annotation_path << std::endl;
-    }
+    for (std::string r : rooms) {
+        //extract all scene folders
+        std::string result_path = prefix_input + "/" + r;
+        std::cout << result_path << std::endl;
 
-    //----------------------------extract all scene comparisons----------------------------------
+        std::string annotation_path = prefix_anno + "/" + r;
 
-    std::vector<SceneCompInfo> scenes;
-    boost::filesystem::directory_iterator end_iter; // Default constructor for an iterator is the end iterator
-    for (boost::filesystem::directory_iterator iter(result_path); iter != end_iter; ++iter) {
-        if (boost::filesystem::is_directory(*iter)) {
-            std::cout << iter->path() << std::endl;
-
-            SceneCompInfo scene_info;
-            scene_info.result_path = iter->path().string();
-            //extract the two scene names
-            std::string scene_folder = iter->path().filename().string();
-            size_t last_of;
-            last_of = scene_folder.find_last_of("-");
-            scene_info.ref_scene = scene_folder.substr(0,last_of);
-            scene_info.curr_scene = scene_folder.substr(last_of+1, scene_folder.size()-1);
-
-            scenes.push_back(scene_info);
+        if (!boost::filesystem::exists(result_path) || !boost::filesystem::is_directory(result_path)) {
+            std::cerr << "Result folder does not exist " << result_path << std::endl;
         }
-    }
-
-
-    //----------------------------read the annotation----------------------------------
-    std::map<std::string, int> gt_obj_count;
-    std::map<std::string, std::map<std::string, pcl::PointCloud<PointLabel>::Ptr> > scene_annotations_map; //e.g. ("scene2", ("mug", <cloud>))
-    for (boost::filesystem::directory_iterator iter(annotation_path); iter != end_iter; ++iter) {
-        if (boost::filesystem::is_directory(*iter)) {
-            std::cout << iter->path() << std::endl;
-            boost::filesystem::path planes ("planes");
-            std::map<std::string, pcl::PointCloud<PointLabel>::Ptr> objName_cloud_map;
-            for (boost::filesystem::directory_iterator plane_iter(iter->path() / planes); plane_iter != end_iter; ++plane_iter) {
-                std::string anno_plane_path = (plane_iter->path() / anno_file_name).string() + "_GT.anno";
-                if(!boost::filesystem::exists(anno_plane_path)) {
-                    std::cerr << "Couldn't find _GT.anno file for plane " << plane_iter->path().string() << ". I was looking for the file " << anno_plane_path << std::endl;
-                    continue;
-                }
-
-                /// read the point cloud for the plane
-                pcl::PointCloud<PointLabel>::Ptr plane_cloud(new pcl::PointCloud<PointLabel>);
-                readInput((plane_iter->path() / anno_file_name).string() + ".pcd", plane_cloud);
-
-                /// read the annotation file
-                std::ifstream anno_file(anno_plane_path);
-                std::string line;
-                while(std::getline(anno_file, line)) {
-                    pcl::PointCloud<PointLabel>::Ptr object_cloud(new pcl::PointCloud<PointLabel>);
-                    std::string object_name;
-                    std::vector<std::string> split_result;
-                    boost::split(split_result, line, boost::is_any_of(" "));
-                    object_name = split_result.at(0);
-                    //special case airplane, because it consists of several parts
-                    if (object_name.find("airplane") != std::string::npos) {
-                        object_name = "airplane";
-                    }
-                    for (size_t i = 1; i < split_result.size()-1; i++) {
-                        int id = std::atoi(split_result.at(i).c_str());
-                        object_cloud->points.push_back(plane_cloud->points[id]);
-                    }
-                    object_cloud->width = object_cloud->points.size();
-                    object_cloud->height = 1;
-                    object_cloud->is_dense=true;
-                    std::string is_on_floor = split_result[split_result.size()-1];
-                    if (is_on_floor == "false") {
-                        objName_cloud_map[object_name] = object_cloud;
-                        std::map<std::string, int>::iterator it = gt_obj_count.find(object_name);
-                        if (it == gt_obj_count.end())
-                            gt_obj_count[object_name] = 1;
-                        else
-                            gt_obj_count[object_name] += 1;
-                    }
-                }
-            }
-            scene_annotations_map[iter->path().filename().string()] = objName_cloud_map;
+        if (!boost::filesystem::exists(annotation_path) || !boost::filesystem::is_directory(annotation_path)) {
+            std::cerr << "Annotation folder does not exist " << annotation_path << std::endl;
         }
-    }
 
-    //----------------------------create GT for all scene comparisons from the result folder----------------------------------
-
-    /// save scene2-scene3 (key) together with two clouds and number of detected objects
-    std::map<std::string, GTCloudsAndNumbers> scene_GTClouds_map;
-    for (size_t i = 0; i < scenes.size(); i++) {
-        const SceneCompInfo &scene_comp = scenes[i];
-        GTCloudsAndNumbers gt_cloud_numbers  = createGTforSceneComp(scene_annotations_map, scene_comp);
-
-        if (gt_cloud_numbers.clouds.ref_GT_cloud->empty() || gt_cloud_numbers.clouds.curr_GT_cloud->empty())
-            continue;
-
-        std::string comp_string = scene_comp.ref_scene + "-" + scene_comp.curr_scene;
-        scene_GTClouds_map[comp_string] = gt_cloud_numbers;
-    }
-
-
-
-    //----------------------------the real evaluation happens now----------------------------------
-    /// iterate over all scene comparison folders
-    std::vector<Measurements> all_gt_results, all_tp_results, all_fp_results;
-    std::map<std::string, int> det_obj_count_comp, gt_obj_count_comp, tp_class_object_count;
-    //measurements based on detected objects
-    std::vector<Measurements> reduced_all_gt_results, reduced_all_tp_results, reduced_all_fp_results;
-    std::map<std::string, int> reduced_det_obj_count_comp, reduced_gt_obj_count_comp, reduced_tp_class_object_count;
-    for (size_t i = 0; i < scenes.size(); i++) {
-        const SceneCompInfo &scene_comp = scenes[i];
-        std::string scene_comp_str = scene_comp.ref_scene + "-" + scene_comp.curr_scene;
-        const GTCloudsAndNumbers gt_cloud_numbers = scene_GTClouds_map[scene_comp_str];
-
-        Measurements result, FP_results;
-        std::vector<std::string> ref_matched_removed, curr_matched_novel, matched_moved, matched_static;
-        //measurements based on detected objects
-        std::map<std::string, std::map<std::string, pcl::PointCloud<PointLabel>::Ptr> > reduced_scene_annotations_map;
-        Measurements reduced_result, reduced_FP_results;
-        std::vector<std::string> reduced_ref_matched_removed, reduced_curr_matched_novel, reduced_matched_moved, reduced_matched_static;
-        std::map<std::string, pcl::PointCloud<PointLabel>::Ptr> curr_scene_GT_obj = scene_annotations_map[scene_comp.curr_scene];
-        std::map<std::string, pcl::PointCloud<PointLabel>::Ptr> ref_scene_GT_obj = scene_annotations_map[scene_comp.ref_scene];
-
-
-        std::vector<DetObject> novel_objects = readObjResultFile(scene_comp.result_path + "/" + c_new_obj_name);
-        std::vector<DetObject> removed_objects = readObjResultFile(scene_comp.result_path + "/" + r_rem_obj_name);
-        std::vector<DetObject> r_moved_objects = readObjResultFile(scene_comp.result_path + "/" + r_dis_obj_name);
-        std::vector<DetObject> c_moved_objects = readObjResultFile(scene_comp.result_path + "/" + c_dis_obj_name);
-        std::vector<DetObject> r_static_objects = readObjResultFile(scene_comp.result_path + "/" + r_static_obj_name);
-        std::vector<DetObject> c_static_objects = readObjResultFile(scene_comp.result_path + "/" + c_static_obj_name);
-
-        //merge all GT/detected objects
-        pcl::PointCloud<PointLabel>::Ptr all_GT_ref_objects_as_point(new pcl::PointCloud<PointLabel>);
-        pcl::PointCloud<PointLabel>::Ptr all_det_ref_objects_as_point(new pcl::PointCloud<PointLabel>);
-        pcl::PointCloud<PointLabel>::Ptr all_GT_curr_objects_as_point(new pcl::PointCloud<PointLabel>);
-        pcl::PointCloud<PointLabel>::Ptr all_det_curr_objects_as_point(new pcl::PointCloud<PointLabel>);
-        addObjectsToCloud(all_det_curr_objects_as_point, novel_objects);
-        addObjectsToCloud(all_det_ref_objects_as_point, removed_objects);
-
-        std::vector<DetObject> all_ref_det_objects;
-        std::vector<DetObject> all_curr_det_objects;
-        all_ref_det_objects = removed_objects;
-        all_ref_det_objects.insert(all_ref_det_objects.end(), r_moved_objects.begin(), r_moved_objects.end());
-        all_ref_det_objects.insert(all_ref_det_objects.end(), r_static_objects.begin(), r_static_objects.end());
-        all_curr_det_objects = novel_objects;
-        all_curr_det_objects.insert(all_curr_det_objects.end(), c_moved_objects.begin(), c_moved_objects.end());
-        all_curr_det_objects.insert(all_curr_det_objects.end(), c_static_objects.begin(), c_static_objects.end());
-
-        //create object associations
-        std::vector<std::tuple<std::string, std::string>> det_object_ass_strings = readObjAssFile(scene_comp.result_path + "/" + obj_ass_name);
-        std::vector<AssociatedObjects> det_static_associations, det_moved_associations;
-        for (std::tuple<std::string, std::string> ass_tuple : det_object_ass_strings) {
-            std::string ref_label = std::get<0>(ass_tuple);
-            std::string curr_label = std::get<1>(ass_tuple);
-
-            bool ref_is_static = false;
-            bool curr_is_static =false;
-            //find corresponding reference DetObject
-            std::vector<DetObject>::iterator ref_it = find_if(r_moved_objects.begin(), r_moved_objects.end(),
-                                                              [ref_label](const DetObject ref_obj){return ref_obj.label == ref_label;});
-            //if not found in  moved objects, then it should be in static objects
-            if (ref_it == r_moved_objects.end()) {
-                ref_it = find_if(r_static_objects.begin(), r_static_objects.end(),
-                                 [ref_label](const DetObject ref_obj){return ref_obj.label == ref_label;});
-                ref_is_static=true;
-                if (ref_it == r_static_objects.end()) {
-                    std::cerr << "Could not find the following object from reference scene either in displaced nor static result files: " << ref_label << std::endl;
-                    exit(-1);
-                }
-            }
-
-            //find corresponding current DetObject
-            std::vector<DetObject>::iterator curr_it = find_if(c_moved_objects.begin(), c_moved_objects.end(),
-                                                               [curr_label](const DetObject curr_obj){return curr_obj.label == curr_label;});
-            //if not found in  moved objects, then it should be in static objects
-            if (curr_it == c_moved_objects.end()) {
-                curr_it = find_if(c_static_objects.begin(), c_static_objects.end(),
-                                  [curr_label](const DetObject curr_obj){return curr_obj.label == curr_label;});
-                curr_is_static = true;
-                if (curr_it == c_static_objects.end()) {
-                    std::cerr << "Could not find the following object from current scene either in displaced nor static result files: " << curr_label << std::endl;
-                    exit(-1);
-                }
-            }
-
-            if (curr_is_static != ref_is_static) {
-                std::cerr << "Found object association where one object is static while the other is moved: " << ref_label << "-" << curr_label << std::endl;
+        std::vector<std::string> ycbv_classes;
+        if (ycbv_eval) {
+            if (!boost::filesystem::exists(ycbv_class_file)) {
+                std::cerr << "File with valid ycbv classes does not exist. Path: " << ycbv_class_file;
                 exit(-1);
             }
-            if (ref_is_static)
-                det_static_associations.push_back(AssociatedObjects{*ref_it, *curr_it});
-            else
-                det_moved_associations.push_back(AssociatedObjects{*ref_it, *curr_it});
-
-            addObjectsToCloud(all_det_ref_objects_as_point, {*ref_it});
-            addObjectsToCloud(all_det_curr_objects_as_point, {*curr_it});
-        }
-
-
-        //number of detected objects = GT objects which have a detected object in their visinity
-        for (GTObject gt_obj : gt_cloud_numbers.ref_objects) {
-            mergeObjectIntoMap(gt_obj_count_comp, gt_obj.name);
-            PointXYZ center_point = computeMeanPoint(gt_obj.object_cloud);
-            DetObject obj {gt_obj.name, center_point};
-            int closest_idx = findClosestObject(all_ref_det_objects, obj);
-            if (closest_idx >= 0) {
-                result.nr_det_obj += 1;
-                mergeObjectIntoMap(det_obj_count_comp, gt_obj.name);
-            }
-            else {
-                //remove it from GT for reduced set
-                ref_scene_GT_obj.erase(gt_obj.name);
-            }
-        }
-        for (GTObject gt_obj : gt_cloud_numbers.curr_objects) {
-            mergeObjectIntoMap(gt_obj_count_comp, gt_obj.name);
-            PointXYZ center_point = computeMeanPoint(gt_obj.object_cloud);
-            DetObject obj {gt_obj.name, center_point};
-            int closest_idx = findClosestObject(all_curr_det_objects, obj);
-            if (closest_idx >= 0) {
-                result.nr_det_obj += 1;
-                mergeObjectIntoMap(det_obj_count_comp, gt_obj.name);
-            }
-            else {
-                //remove it from GT for reduced set
-                curr_scene_GT_obj.erase(gt_obj.name);
+            std::ifstream ycbv_file(ycbv_class_file);
+            std::string line;
+            while(std::getline(ycbv_file, line)) {
+                ycbv_classes.push_back(line);
             }
         }
 
-        //create GT based on detected objects
-        reduced_scene_annotations_map[scene_comp.curr_scene] = curr_scene_GT_obj;
-        reduced_scene_annotations_map[scene_comp.ref_scene] = ref_scene_GT_obj;
+        //----------------------------extract all scene comparisons----------------------------------
 
-        const GTCloudsAndNumbers reduced_gt_cloud_numbers  = createGTforSceneComp(reduced_scene_annotations_map, scene_comp);
+        std::vector<SceneCompInfo> scenes;
+        boost::filesystem::directory_iterator end_iter; // Default constructor for an iterator is the end iterator
+        for (boost::filesystem::directory_iterator iter(result_path); iter != end_iter; ++iter) {
+            if (boost::filesystem::is_directory(*iter)) {
+                std::cout << iter->path() << std::endl;
 
+                SceneCompInfo scene_info;
+                scene_info.result_path = iter->path().string();
+                //extract the two scene names
+                std::string scene_folder = iter->path().filename().string();
+                size_t last_of;
+                last_of = scene_folder.find_last_of("-");
+                scene_info.ref_scene = scene_folder.substr(0,last_of);
+                scene_info.curr_scene = scene_folder.substr(last_of+1, scene_folder.size()-1);
 
-        //----------CHECK NOVEL OBJECTS------------------------------
-        //extract GT new objects and compute a center point
-        std::vector<DetObject> gt_new_objects;
-        for (const GTObject gt_new_obj : gt_cloud_numbers.curr_objects) {
-            if (gt_new_obj.class_label == ObjectClass::NEW) {
-                PointXYZ center_point = computeMeanPoint(gt_new_obj.object_cloud);
-                DetObject obj {gt_new_obj.name, center_point};
-                gt_new_objects.push_back(obj);
-            }
-        }
-        addObjectsToCloud(all_GT_curr_objects_as_point, gt_new_objects);
-
-
-        //for each detected new object, check if there is a new GT object close by
-        std::vector<DetObject> rem_new_det_obj;
-        for (DetObject det_obj : novel_objects) {
-            //find the closest GT and check the distance
-            int closest_idx = findClosestObject(gt_new_objects, det_obj);
-            if (closest_idx >= 0) {
-                result.nr_novel_obj++;
-                mergeObjectIntoMap(tp_class_object_count, gt_new_objects[closest_idx].label);
-                gt_new_objects.erase(gt_new_objects.begin() + closest_idx);
-            } else {
-                rem_new_det_obj.push_back(det_obj);
-            }
-        }
-        FP_results.nr_novel_obj += rem_new_det_obj.size();
-
-        //-----------------------------------------------------------
-
-        //----------CHECK REMOVED OBJECTS------------------------------
-        //extract GT removed objects and compute a center point
-        std::vector<DetObject> gt_removed_objects;
-        for (const GTObject gt_removed_obj : gt_cloud_numbers.ref_objects) {
-            if (gt_removed_obj.class_label == ObjectClass::REMOVED) {
-                PointXYZ center_point = computeMeanPoint(gt_removed_obj.object_cloud);
-                DetObject obj {gt_removed_obj.name, center_point};
-                gt_removed_objects.push_back(obj);
-            }
-        }
-        addObjectsToCloud(all_GT_ref_objects_as_point, gt_removed_objects);
-
-        //for each detected new object, check if there is a new GT object close by
-        std::vector<DetObject> rem_removed_det_obj;
-        for (DetObject det_obj : removed_objects) {
-            //find the closest GT and check the distance
-            int closest_idx = findClosestObject(gt_removed_objects, det_obj);
-            if (closest_idx >= 0) {
-                result.nr_removed_obj++;
-                mergeObjectIntoMap(tp_class_object_count, gt_removed_objects[closest_idx].label);
-                gt_removed_objects.erase(gt_removed_objects.begin() + closest_idx);
-            } else {
-                rem_removed_det_obj.push_back(det_obj);
-            }
-        }
-        FP_results.nr_removed_obj += rem_removed_det_obj.size();
-
-        //-----------------------------------------------------------
-
-
-        //----------CHECK DISPLACED OBJECTS------------------------------
-        //extract GT new objects and compute a center point
-        std::vector<AssociatedObjects> gt_displaced_objects;
-        for (const GTObject gt_ref_displaced_obj : gt_cloud_numbers.ref_objects) {
-            if (gt_ref_displaced_obj.class_label >= 1000 && gt_ref_displaced_obj.class_label <= 1950) { //DISPLACED
-                /// find the corresponding curr object
-                std::vector<GTObject>::const_iterator curr_it = find_if(gt_cloud_numbers.curr_objects.begin(), gt_cloud_numbers.curr_objects.end(),
-                                                                        [gt_ref_displaced_obj](const GTObject curr_obj){return gt_ref_displaced_obj.class_label == curr_obj.class_label;});
-                PointXYZ ref_center_point = computeMeanPoint(gt_ref_displaced_obj.object_cloud);
-                DetObject obj_ref {gt_ref_displaced_obj.name, ref_center_point};
-                PointXYZ curr_center_point = computeMeanPoint(curr_it->object_cloud);
-                DetObject obj_curr {curr_it->name, curr_center_point};
-                AssociatedObjects ass_obj {obj_ref, obj_curr};
-                gt_displaced_objects.push_back(ass_obj);
-
-                addObjectsToCloud(all_GT_ref_objects_as_point, {obj_ref});
-                addObjectsToCloud(all_GT_curr_objects_as_point, {obj_curr});
+                scenes.push_back(scene_info);
             }
         }
 
-        //for each detected static object pair, check if there is a static GT object pair close by
-        std::vector<DetObject> rem_ref_displaced_det_obj, rem_curr_displaced_det_obj;
-        for (AssociatedObjects det_obj : det_moved_associations) {
-            //find the closest GT and check the distance
-            int closest_idx = findClosestObjectAssociation(gt_displaced_objects, det_obj);
-            if (closest_idx >= 0) {
-                result.nr_moved_obj += 2;
-                mergeObjectIntoMap(tp_class_object_count, gt_displaced_objects[closest_idx].ref_obj.label);
-                mergeObjectIntoMap(tp_class_object_count, gt_displaced_objects[closest_idx].curr_obj.label);
-                gt_displaced_objects.erase(gt_displaced_objects.begin() + closest_idx);
-            } else {
-                rem_ref_displaced_det_obj.push_back(det_obj.ref_obj);
-                rem_curr_displaced_det_obj.push_back(det_obj.curr_obj);
-            }
-        }
-        FP_results.nr_moved_obj += rem_ref_displaced_det_obj.size();
-        FP_results.nr_moved_obj += rem_curr_displaced_det_obj.size();
 
-        //-----------------------------------------------------------
+        //----------------------------read the annotation----------------------------------
+        std::map<std::string, int> gt_obj_count;
+        std::map<std::string, std::map<std::string, pcl::PointCloud<PointLabel>::Ptr> > scene_annotations_map; //e.g. ("scene2", ("mug", <cloud>))
+        for (boost::filesystem::directory_iterator iter(annotation_path); iter != end_iter; ++iter) {
+            if (boost::filesystem::is_directory(*iter)) {
+                std::cout << iter->path() << std::endl;
+                boost::filesystem::path planes ("planes");
+                std::map<std::string, pcl::PointCloud<PointLabel>::Ptr> objName_cloud_map;
+                for (boost::filesystem::directory_iterator plane_iter(iter->path() / planes); plane_iter != end_iter; ++plane_iter) {
+                    std::string anno_plane_path = (plane_iter->path() / anno_file_name).string() + "_GT.anno";
+                    if(!boost::filesystem::exists(anno_plane_path)) {
+                        std::cerr << "Couldn't find _GT.anno file for plane " << plane_iter->path().string() << ". I was looking for the file " << anno_plane_path << std::endl;
+                        continue;
+                    }
 
+                    /// read the point cloud for the plane
+                    pcl::PointCloud<PointLabel>::Ptr plane_cloud(new pcl::PointCloud<PointLabel>);
+                    readInput((plane_iter->path() / anno_file_name).string() + ".pcd", plane_cloud);
 
-        //----------CHECK STATIC OBJECTS------------------------------
-        //extract GT new objects and compute a center point
-        std::vector<AssociatedObjects> gt_static_objects;
-        for (const GTObject gt_ref_static_obj : gt_cloud_numbers.ref_objects) {
-            if (gt_ref_static_obj.class_label >= 20 && gt_ref_static_obj.class_label <= 950) { //STATIC
-                /// find the corresponding curr object
-                std::vector<GTObject>::const_iterator curr_it = find_if(gt_cloud_numbers.curr_objects.begin(), gt_cloud_numbers.curr_objects.end(),
-                                                                        [gt_ref_static_obj](const GTObject curr_obj){return gt_ref_static_obj.class_label == curr_obj.class_label;});
-                PointXYZ ref_center_point = computeMeanPoint(gt_ref_static_obj.object_cloud);
-                DetObject obj_ref {gt_ref_static_obj.name, ref_center_point};
-                PointXYZ curr_center_point = computeMeanPoint(curr_it->object_cloud);
-                DetObject obj_curr {curr_it->name, curr_center_point};
-                AssociatedObjects ass_obj {obj_ref, obj_curr};
-                gt_static_objects.push_back(ass_obj);
+                    /// read the annotation file
+                    std::ifstream anno_file(anno_plane_path);
+                    std::string line;
+                    while(std::getline(anno_file, line)) {
+                        pcl::PointCloud<PointLabel>::Ptr object_cloud(new pcl::PointCloud<PointLabel>);
+                        std::string object_name;
+                        std::vector<std::string> split_result;
+                        boost::split(split_result, line, boost::is_any_of(" "));
+                        object_name = split_result.at(0);
 
-                addObjectsToCloud(all_GT_ref_objects_as_point, {obj_ref});
-                addObjectsToCloud(all_GT_curr_objects_as_point, {obj_curr});
-            }
-        }
+                        if (ycbv_eval && !isYCBVObject(ycbv_classes, object_name))
+                            continue;
 
-        //for each detected static object pair, check if there is a static GT object pair close by
-        std::vector<DetObject> rem_ref_static_det_obj, rem_curr_static_det_obj;
-        for (AssociatedObjects det_obj : det_static_associations) {
-            //find the closest GT and check the distance
-            int closest_idx = findClosestObjectAssociation(gt_static_objects, det_obj);
-            if (closest_idx >= 0) {
-                result.nr_static_obj += 2;
-                mergeObjectIntoMap(tp_class_object_count, gt_static_objects[closest_idx].ref_obj.label);
-                mergeObjectIntoMap(tp_class_object_count, gt_static_objects[closest_idx].curr_obj.label);
-                gt_static_objects.erase(gt_static_objects.begin() + closest_idx);
-            } else {
-                rem_ref_static_det_obj.push_back(det_obj.ref_obj);
-                rem_curr_static_det_obj.push_back(det_obj.curr_obj);
-            }
-        }
-
-        //special case for static objects - remaining objects are not necesarely FPs, but background objects that were detected
-        //for all remaining (not matched GT objects) check if there is one close by in the not matched static objects
-        std::vector<DetObject> ref_all_remaining_GT_objects, curr_all_remaining_GT_objects;
-        ref_all_remaining_GT_objects.insert(ref_all_remaining_GT_objects.begin(), gt_removed_objects.begin(), gt_removed_objects.end());
-        curr_all_remaining_GT_objects.insert(curr_all_remaining_GT_objects.begin(), gt_new_objects.begin(), gt_new_objects.end());
-        for (AssociatedObjects ass_obj : gt_displaced_objects) {
-            ref_all_remaining_GT_objects.push_back(ass_obj.ref_obj);
-            curr_all_remaining_GT_objects.push_back(ass_obj.curr_obj);
-        }
-        for (DetObject det_obj : rem_ref_static_det_obj) {
-            //find the closest GT and check the distance
-            int closest_idx = findClosestObject(ref_all_remaining_GT_objects, det_obj);
-            if (closest_idx >= 0) {
-                FP_results.nr_static_obj += 1;
-                ref_all_remaining_GT_objects.erase(ref_all_remaining_GT_objects.begin() + closest_idx);
-            }
-        }
-        for (DetObject det_obj : rem_curr_static_det_obj) {
-            //find the closest GT and check the distance
-            int closest_idx = findClosestObject(curr_all_remaining_GT_objects, det_obj);
-            if (closest_idx >= 0) {
-                FP_results.nr_static_obj += 1;
-                curr_all_remaining_GT_objects.erase(curr_all_remaining_GT_objects.begin() + closest_idx);
+                        //special case airplane, because it consists of several parts
+                        if (object_name.find("airplane") != std::string::npos) {
+                            object_name = "airplane";
+                        }
+                        for (size_t i = 1; i < split_result.size()-1; i++) {
+                            int id = std::atoi(split_result.at(i).c_str());
+                            object_cloud->points.push_back(plane_cloud->points[id]);
+                        }
+                        object_cloud->width = object_cloud->points.size();
+                        object_cloud->height = 1;
+                        object_cloud->is_dense=true;
+                        std::string is_on_floor = split_result[split_result.size()-1];
+                        if (is_on_floor == "false") {
+                            objName_cloud_map[object_name] = object_cloud;
+                            std::map<std::string, int>::iterator it = gt_obj_count.find(object_name);
+                            if (it == gt_obj_count.end())
+                                gt_obj_count[object_name] = 1;
+                            else
+                                gt_obj_count[object_name] += 1;
+                        }
+                    }
+                }
+                scene_annotations_map[iter->path().filename().string()] = objName_cloud_map;
             }
         }
 
-        pcl::io::savePCDFileBinary(scene_comp.result_path + "/all_GT_ref_objects_as_points.pcd", *all_GT_ref_objects_as_point);
-        pcl::io::savePCDFileBinary(scene_comp.result_path + "/all_GT_curr_objects_as_points.pcd", *all_GT_curr_objects_as_point);
-        pcl::io::savePCDFileBinary(scene_comp.result_path + "/all_det_ref_objects_as_points.pcd", *all_det_ref_objects_as_point);
-        pcl::io::savePCDFileBinary(scene_comp.result_path + "/all_det_curr_objects_as_points.pcd", *all_det_curr_objects_as_point);
+        //----------------------------create GT for all scene comparisons from the result folder----------------------------------
 
-        std::cout << scene_comp.ref_scene + "-" + scene_comp.curr_scene << std::endl;
-        std::cout << "GT numbers \n" << gt_cloud_numbers.m;
-        std::cout << "-------------------------------------------" << std::endl;
-        std::cout << "True Positives" << "\n" << result;
-        std::cout << "-------------------------------------------" << std::endl;
-        std::cout << "False Positives" << "\n" << FP_results;
-        std::cout << "-------------------------------------------" << std::endl;
-        std::cout << "Found NOVEL objects: " << curr_matched_novel << std::endl;
-        std::cout << "Found REMOVED objects: " << ref_matched_removed << std::endl;
-        std::cout << "Found MOVED objects: " << matched_moved << std::endl;
-        std::cout << "Found STATIC objects: " << matched_static << std::endl;
-        std::cout << "###############################################" << std::endl;
+        /// save scene2-scene3 (key) together with two clouds and number of detected objects
+        std::map<std::string, GTCloudsAndNumbers> scene_GTClouds_map;
+        for (size_t i = 0; i < scenes.size(); i++) {
+            const SceneCompInfo &scene_comp = scenes[i];
+            GTCloudsAndNumbers gt_cloud_numbers  = createGTforSceneComp(scene_annotations_map, scene_comp);
 
-        std::ofstream scene_comp_result_file;
-        scene_comp_result_file.open(scene_comp.result_path+"/result.txt");
-        scene_comp_result_file << "GT numbers \n" << gt_cloud_numbers.m;
-        scene_comp_result_file << "-------------------------------------------" << "\n";
-        scene_comp_result_file << "True Positives" << "\n" << result;
-        scene_comp_result_file << "-------------------------------------------" << "\n";
-        scene_comp_result_file << "False Positives" << "\n" << FP_results;
-        scene_comp_result_file << "-------------------------------------------" << "\n";
-        scene_comp_result_file << "Found NOVEL objects: " << curr_matched_novel << "\n";
-        scene_comp_result_file << "Found REMOVED objects: " << ref_matched_removed << "\n";
-        scene_comp_result_file << "Found MOVED objects: " << matched_moved << "\n";
-        scene_comp_result_file << "Found STATIC objects: " << matched_static << "\n";
+            if (gt_cloud_numbers.clouds.ref_GT_cloud->empty() || gt_cloud_numbers.clouds.curr_GT_cloud->empty())
+                continue;
 
-        //        scene_comp_result_file << "\n-------------------------------Based on detected objects----------------------------------------\n";
-        //        scene_comp_result_file << "GT numbers \n" << reduced_gt_cloud_numbers.m;
-        //        scene_comp_result_file << "-------------------------------------------" << "\n";
-        //        scene_comp_result_file << "True Positives" << "\n" << reduced_result;
-        //        scene_comp_result_file << "-------------------------------------------" << "\n";
-        //        scene_comp_result_file << "False Positives" << "\n" << reduced_FP_results;
-        //        scene_comp_result_file << "-------------------------------------------" << "\n";
-        //        scene_comp_result_file << "Found NOVEL objects: " << reduced_curr_matched_novel << "\n";
-        //        scene_comp_result_file << "Found REMOVED objects: " << reduced_ref_matched_removed << "\n";
-        //        scene_comp_result_file << "Found MOVED objects: " << reduced_matched_moved << "\n";
-        //        scene_comp_result_file << "Found STATIC objects: " << reduced_matched_static << "\n";
-        scene_comp_result_file.close();
+            std::string comp_string = scene_comp.ref_scene + "-" + scene_comp.curr_scene;
+            scene_GTClouds_map[comp_string] = gt_cloud_numbers;
+        }
 
-        all_gt_results.push_back(gt_cloud_numbers.m);
-        all_tp_results.push_back(result);
-        all_fp_results.push_back(FP_results);
 
-        //        reduced_all_gt_results.push_back(reduced_gt_cloud_numbers.m);
-        //        reduced_all_tp_results.push_back(reduced_result);
-        //        reduced_all_fp_results.push_back(reduced_FP_results);
+
+        //----------------------------the real evaluation happens now----------------------------------
+        /// iterate over all scene comparison folders
+        std::vector<Measurements> all_gt_results, all_tp_results, all_fp_results;
+        std::map<std::string, int> det_obj_count_comp, gt_obj_count_comp, tp_class_object_count;
+        //measurements based on detected objects
+        std::vector<Measurements> reduced_all_gt_results, reduced_all_tp_results, reduced_all_fp_results;
+        std::map<std::string, int> reduced_det_obj_count_comp, reduced_gt_obj_count_comp, reduced_tp_class_object_count;
+        for (size_t i = 0; i < scenes.size(); i++) {
+            const SceneCompInfo &scene_comp = scenes[i];
+            std::string scene_comp_str = scene_comp.ref_scene + "-" + scene_comp.curr_scene;
+            const GTCloudsAndNumbers gt_cloud_numbers = scene_GTClouds_map[scene_comp_str];
+
+            Measurements result, FP_results;
+            std::vector<std::string> ref_matched_removed, curr_matched_novel, matched_moved, matched_static;
+            //measurements based on detected objects
+            std::map<std::string, std::map<std::string, pcl::PointCloud<PointLabel>::Ptr> > reduced_scene_annotations_map;
+            Measurements reduced_result, reduced_FP_results;
+            std::vector<std::string> reduced_ref_matched_removed, reduced_curr_matched_novel, reduced_matched_moved, reduced_matched_static;
+            std::map<std::string, pcl::PointCloud<PointLabel>::Ptr> curr_scene_GT_obj = scene_annotations_map[scene_comp.curr_scene];
+            std::map<std::string, pcl::PointCloud<PointLabel>::Ptr> ref_scene_GT_obj = scene_annotations_map[scene_comp.ref_scene];
+
+
+            std::vector<DetObject> novel_objects = readObjResultFile(scene_comp.result_path + "/" + c_new_obj_name);
+            std::vector<DetObject> removed_objects = readObjResultFile(scene_comp.result_path + "/" + r_rem_obj_name);
+            std::vector<DetObject> r_moved_objects = readObjResultFile(scene_comp.result_path + "/" + r_dis_obj_name);
+            std::vector<DetObject> c_moved_objects = readObjResultFile(scene_comp.result_path + "/" + c_dis_obj_name);
+            std::vector<DetObject> r_static_objects = readObjResultFile(scene_comp.result_path + "/" + r_static_obj_name);
+            std::vector<DetObject> c_static_objects = readObjResultFile(scene_comp.result_path + "/" + c_static_obj_name);
+
+            //merge all GT/detected objects
+            pcl::PointCloud<PointLabel>::Ptr all_det_ref_objects_as_point(new pcl::PointCloud<PointLabel>);
+            pcl::PointCloud<PointLabel>::Ptr all_det_curr_objects_as_point(new pcl::PointCloud<PointLabel>);
+            addObjectsToCloud(all_det_curr_objects_as_point, novel_objects);
+            addObjectsToCloud(all_det_ref_objects_as_point, removed_objects);
+
+            std::vector<DetObject> all_ref_det_objects;
+            std::vector<DetObject> all_curr_det_objects;
+            all_ref_det_objects = removed_objects;
+            all_ref_det_objects.insert(all_ref_det_objects.end(), r_moved_objects.begin(), r_moved_objects.end());
+            all_ref_det_objects.insert(all_ref_det_objects.end(), r_static_objects.begin(), r_static_objects.end());
+            all_curr_det_objects = novel_objects;
+            all_curr_det_objects.insert(all_curr_det_objects.end(), c_moved_objects.begin(), c_moved_objects.end());
+            all_curr_det_objects.insert(all_curr_det_objects.end(), c_static_objects.begin(), c_static_objects.end());
+
+            //create object associations
+            std::vector<std::tuple<std::string, std::string>> det_object_ass_strings = readObjAssFile(scene_comp.result_path + "/" + obj_ass_name);
+            std::vector<AssociatedObjects> det_static_associations, det_moved_associations;
+            for (std::tuple<std::string, std::string> ass_tuple : det_object_ass_strings) {
+                std::string ref_label = std::get<0>(ass_tuple);
+                std::string curr_label = std::get<1>(ass_tuple);
+
+                bool ref_is_static = false;
+                bool curr_is_static =false;
+                //find corresponding reference DetObject
+                std::vector<DetObject>::iterator ref_it = find_if(r_moved_objects.begin(), r_moved_objects.end(),
+                                                                  [ref_label](const DetObject ref_obj){return ref_obj.label == ref_label;});
+                //if not found in  moved objects, then it should be in static objects
+                if (ref_it == r_moved_objects.end()) {
+                    ref_it = find_if(r_static_objects.begin(), r_static_objects.end(),
+                                     [ref_label](const DetObject ref_obj){return ref_obj.label == ref_label;});
+                    ref_is_static=true;
+                    if (ref_it == r_static_objects.end()) {
+                        std::cerr << "Could not find the following object from reference scene either in displaced nor static result files: " << ref_label << std::endl;
+                        exit(-1);
+                    }
+                }
+
+                //find corresponding current DetObject
+                std::vector<DetObject>::iterator curr_it = find_if(c_moved_objects.begin(), c_moved_objects.end(),
+                                                                   [curr_label](const DetObject curr_obj){return curr_obj.label == curr_label;});
+                //if not found in  moved objects, then it should be in static objects
+                if (curr_it == c_moved_objects.end()) {
+                    curr_it = find_if(c_static_objects.begin(), c_static_objects.end(),
+                                      [curr_label](const DetObject curr_obj){return curr_obj.label == curr_label;});
+                    curr_is_static = true;
+                    if (curr_it == c_static_objects.end()) {
+                        std::cerr << "Could not find the following object from current scene either in displaced nor static result files: " << curr_label << std::endl;
+                        exit(-1);
+                    }
+                }
+
+                if (curr_is_static != ref_is_static) {
+                    std::cerr << "Found object association where one object is static while the other is moved: " << ref_label << "-" << curr_label << std::endl;
+                    exit(-1);
+                }
+                if (ref_is_static)
+                    det_static_associations.push_back(AssociatedObjects{*ref_it, *curr_it});
+                else
+                    det_moved_associations.push_back(AssociatedObjects{*ref_it, *curr_it});
+
+                addObjectsToCloud(all_det_ref_objects_as_point, {*ref_it});
+                addObjectsToCloud(all_det_curr_objects_as_point, {*curr_it});
+            }
+
+
+            //number of detected objects = GT objects which have a detected object in their visinity
+            for (GTObject gt_obj : gt_cloud_numbers.ref_objects) {
+                mergeObjectIntoMap(gt_obj_count_comp, gt_obj.name);
+                PointXYZ center_point = computeMeanPoint(gt_obj.object_cloud);
+                DetObject obj {gt_obj.name, center_point};
+                int closest_idx = findClosestObject(all_ref_det_objects, obj);
+                if (closest_idx >= 0) {
+                    result.nr_det_obj += 1;
+                    mergeObjectIntoMap(det_obj_count_comp, gt_obj.name);
+                    mergeObjectIntoMap(reduced_det_obj_count_comp, gt_obj.name);
+                    mergeObjectIntoMap(reduced_gt_obj_count_comp, gt_obj.name);
+                }
+                else {
+                    //remove it from GT for reduced set
+                    ref_scene_GT_obj.erase(gt_obj.name);
+                }
+            }
+            for (GTObject gt_obj : gt_cloud_numbers.curr_objects) {
+                mergeObjectIntoMap(gt_obj_count_comp, gt_obj.name);
+                PointXYZ center_point = computeMeanPoint(gt_obj.object_cloud);
+                DetObject obj {gt_obj.name, center_point};
+                int closest_idx = findClosestObject(all_curr_det_objects, obj);
+                if (closest_idx >= 0) {
+                    result.nr_det_obj += 1;
+                    mergeObjectIntoMap(det_obj_count_comp, gt_obj.name);
+                    mergeObjectIntoMap(reduced_det_obj_count_comp, gt_obj.name);
+                    mergeObjectIntoMap(reduced_gt_obj_count_comp, gt_obj.name);
+                }
+                else {
+                    //remove it from GT for reduced set
+                    curr_scene_GT_obj.erase(gt_obj.name);
+                }
+            }
+
+            //create GT based on detected objects
+            reduced_scene_annotations_map[scene_comp.curr_scene] = curr_scene_GT_obj;
+            reduced_scene_annotations_map[scene_comp.ref_scene] = ref_scene_GT_obj;
+
+            const GTCloudsAndNumbers reduced_gt_cloud_numbers  = createGTforSceneComp(reduced_scene_annotations_map, scene_comp);
+
+
+            //----------CHECK NOVEL OBJECTS------------------------------
+            std::vector<DetObject> gt_rem_new_objects = checkNovelObjects(gt_cloud_numbers, novel_objects, result, FP_results, tp_class_object_count);
+            std::vector<DetObject> reduced_gt_rem_new_objects = checkNovelObjects(reduced_gt_cloud_numbers, novel_objects, reduced_result, reduced_FP_results, reduced_tp_class_object_count);
+
+
+            //----------CHECK REMOVED OBJECTS------------------------------
+            std::vector<DetObject> gt_rem_removed_objects = checkRemovedObjects(gt_cloud_numbers, removed_objects, result, FP_results, tp_class_object_count);
+            std::vector<DetObject> reduced_gt_rem_removed_objects = checkRemovedObjects(reduced_gt_cloud_numbers, removed_objects, reduced_result, reduced_FP_results, reduced_tp_class_object_count);
+
+
+            //----------CHECK DISPLACED OBJECTS------------------------------
+            std::vector<AssociatedObjects> gt_rem_displaced_objects = checkDisplacedObjects(gt_cloud_numbers, det_moved_associations, result, FP_results, tp_class_object_count);
+            std::vector<AssociatedObjects> reduced_gt_rem_displaced_objects = checkDisplacedObjects(reduced_gt_cloud_numbers, det_moved_associations, reduced_result, reduced_FP_results, reduced_tp_class_object_count);
+
+
+
+            //----------CHECK STATIC OBJECTS------------------------------
+            checkStaticObjects(gt_cloud_numbers, det_static_associations, gt_rem_new_objects, gt_rem_removed_objects, gt_rem_displaced_objects,
+                               result, FP_results, tp_class_object_count);
+            checkStaticObjects(reduced_gt_cloud_numbers, det_static_associations, reduced_gt_rem_new_objects, reduced_gt_rem_removed_objects, reduced_gt_rem_displaced_objects,
+                               reduced_result, reduced_FP_results, reduced_tp_class_object_count);
+
+
+
+            //        pcl::io::savePCDFileBinary(scene_comp.result_path + "/all_GT_ref_objects_as_points.pcd", *all_GT_ref_objects_as_point);
+            //        pcl::io::savePCDFileBinary(scene_comp.result_path + "/all_GT_curr_objects_as_points.pcd", *all_GT_curr_objects_as_point);
+            //        pcl::io::savePCDFileBinary(scene_comp.result_path + "/all_det_ref_objects_as_points.pcd", *all_det_ref_objects_as_point);
+            //        pcl::io::savePCDFileBinary(scene_comp.result_path + "/all_det_curr_objects_as_points.pcd", *all_det_curr_objects_as_point);
+
+            std::cout << scene_comp.ref_scene + "-" + scene_comp.curr_scene << std::endl;
+            std::cout << "GT numbers \n" << gt_cloud_numbers.m;
+            std::cout << "-------------------------------------------" << std::endl;
+            std::cout << "True Positives" << "\n" << result;
+            std::cout << "-------------------------------------------" << std::endl;
+            std::cout << "False Positives" << "\n" << FP_results;
+            std::cout << "-------------------------------------------" << std::endl;
+            std::cout << "Found NOVEL objects: " << curr_matched_novel << std::endl;
+            std::cout << "Found REMOVED objects: " << ref_matched_removed << std::endl;
+            std::cout << "Found MOVED objects: " << matched_moved << std::endl;
+            std::cout << "Found STATIC objects: " << matched_static << std::endl;
+            std::cout << "###############################################" << std::endl;
+
+            std::ofstream scene_comp_result_file;
+            scene_comp_result_file.open(scene_comp.result_path+"/result.txt");
+            scene_comp_result_file << "GT numbers \n" << gt_cloud_numbers.m;
+            scene_comp_result_file << "-------------------------------------------" << "\n";
+            scene_comp_result_file << "True Positives" << "\n" << result;
+            scene_comp_result_file << "-------------------------------------------" << "\n";
+            scene_comp_result_file << "False Positives" << "\n" << FP_results;
+            scene_comp_result_file << "-------------------------------------------" << "\n";
+            scene_comp_result_file << "Found NOVEL objects: " << curr_matched_novel << "\n";
+            scene_comp_result_file << "Found REMOVED objects: " << ref_matched_removed << "\n";
+            scene_comp_result_file << "Found MOVED objects: " << matched_moved << "\n";
+            scene_comp_result_file << "Found STATIC objects: " << matched_static << "\n";
+
+            scene_comp_result_file << "\n-------------------------------Based on detected objects----------------------------------------\n";
+            scene_comp_result_file << "GT numbers \n" << reduced_gt_cloud_numbers.m;
+            scene_comp_result_file << "-------------------------------------------" << "\n";
+            scene_comp_result_file << "True Positives" << "\n" << reduced_result;
+            scene_comp_result_file << "-------------------------------------------" << "\n";
+            scene_comp_result_file << "False Positives" << "\n" << reduced_FP_results;
+            scene_comp_result_file << "-------------------------------------------" << "\n";
+            scene_comp_result_file << "Found NOVEL objects: " << reduced_curr_matched_novel << "\n";
+            scene_comp_result_file << "Found REMOVED objects: " << reduced_ref_matched_removed << "\n";
+            scene_comp_result_file << "Found MOVED objects: " << reduced_matched_moved << "\n";
+            scene_comp_result_file << "Found STATIC objects: " << reduced_matched_static << "\n";
+            scene_comp_result_file.close();
+
+            all_gt_results.push_back(gt_cloud_numbers.m);
+            all_tp_results.push_back(result);
+            all_fp_results.push_back(FP_results);
+
+            reduced_all_gt_results.push_back(reduced_gt_cloud_numbers.m);
+            reduced_all_tp_results.push_back(reduced_result);
+            reduced_all_fp_results.push_back(reduced_FP_results);
+
+        }
+
+        std::cout << "Overview of objects used in the scenes" << std::endl; //sum of objects used in scene2-scene6
+        for (const auto obj_count : gt_obj_count) {
+            std::cout << obj_count.first << ": " << obj_count.second << std::endl;
+        }
+
+        std::cout << "Number of GT objects using all possible scene comparisons" << std::endl; //sum of objects used in scene2-scene6
+        for (const auto obj_count : gt_obj_count_comp) {
+            std::cout << obj_count.first << ": " << obj_count.second << std::endl;
+        }
+
+        std::cout << "Number of detected objects using all possible scene comparisons" << std::endl; //sum of objects used in scene2-scene6
+        for (const auto obj_count : det_obj_count_comp) {
+            std::cout << obj_count.first << ": " << obj_count.second << std::endl;
+        }
+
+        std::string result_file = result_path +  "/results.txt";
+        //clear the file content
+        std::ofstream result_stream (result_file);
+        result_stream.close();
+        writeSumResultsToFile(all_gt_results, all_tp_results, all_fp_results, result_file);
+        writeObjectSummaryToFile(gt_obj_count_comp, det_obj_count_comp, tp_class_object_count, all_fp_results, result_file);
+
+        //write results based on detected objects
+        result_stream.open (result_file, std::ofstream::out | std::ofstream::app);
+        result_stream << "\n\n-------------------------------Based on detected objects----------------------------------------\n";
+        result_stream.close();
+        writeSumResultsToFile(reduced_all_gt_results, reduced_all_tp_results, reduced_all_fp_results, result_file);
+        writeObjectSummaryToFile(reduced_gt_obj_count_comp, reduced_det_obj_count_comp, reduced_tp_class_object_count, reduced_all_fp_results, result_file);
 
     }
-
-    std::cout << "Overview of objects used in the scenes" << std::endl; //sum of objects used in scene2-scene6
-    for (const auto obj_count : gt_obj_count) {
-        std::cout << obj_count.first << ": " << obj_count.second << std::endl;
-    }
-
-    std::cout << "Number of GT objects using all possible scene comparisons" << std::endl; //sum of objects used in scene2-scene6
-    for (const auto obj_count : gt_obj_count_comp) {
-        std::cout << obj_count.first << ": " << obj_count.second << std::endl;
-    }
-
-    std::cout << "Number of detected objects using all possible scene comparisons" << std::endl; //sum of objects used in scene2-scene6
-    for (const auto obj_count : det_obj_count_comp) {
-        std::cout << obj_count.first << ": " << obj_count.second << std::endl;
-    }
-
-    std::string result_file = result_path +  "/results.txt";
-    //clear the file content
-    std::ofstream result_stream (result_file);
-    result_stream.close();
-    writeSumResultsToFile(all_gt_results, all_tp_results, all_fp_results, result_file);
-    writeObjectSummaryToFile(gt_obj_count_comp, det_obj_count_comp, tp_class_object_count, all_fp_results, result_file);
-
-    //write results based on detected objects
-    //    result_stream.open (result_file, std::ofstream::out | std::ofstream::app);
-    //    result_stream << "\n\n-------------------------------Based on detected objects----------------------------------------\n";
-    //    result_stream.close();
-    //    writeSumResultsToFile(reduced_all_gt_results, reduced_all_tp_results, reduced_all_fp_results, result_file);
-    //    writeObjectSummaryToFile(reduced_gt_obj_count_comp, reduced_det_obj_count_comp, reduced_tp_class_object_count, reduced_all_fp_results, result_file);
-
 }
-
 
 void writeObjectSummaryToFile(std::map<std::string, int> & gt_obj_count, std::map<std::string, int> & det_obj_count, std::map<std::string, int> & tp_class_obj_count,
                               std::vector<Measurements> &all_fp_results, std::string path) {
@@ -720,6 +623,7 @@ void writeObjectSummaryToFile(std::map<std::string, int> & gt_obj_count, std::ma
     result_file << "#detected objects: " << count_det_obj << "\n";
     result_file << "#objects correctly classified: " << count_tp_class_obj << "\n";
     result_file << "#objects wrongly classified: " << FP_sum << "\n";
+    result_file.close();
 }
 
 void writeSumResultsToFile(std::vector<Measurements> all_gt_results, std::vector<Measurements> all_tp_results, std::vector<Measurements> all_fp_results,
@@ -871,8 +775,10 @@ GTCloudsAndNumbers createGTforSceneComp(const std::map<std::string, std::map<std
 
     gt_measurements.nr_det_obj = gt_measurements.nr_novel_obj + gt_measurements.nr_removed_obj + gt_measurements.nr_static_obj + gt_measurements.nr_moved_obj;
 
-    pcl::io::savePCDFileBinary(scene_comp.result_path + "/" + scene_comp.ref_scene + "-" + scene_comp.curr_scene + ".pcd", *ref_GT_cloud);
-    pcl::io::savePCDFileBinary(scene_comp.result_path + "/" + scene_comp.curr_scene + "-" + scene_comp.ref_scene + ".pcd", *curr_GT_cloud);
+    if (!ref_GT_cloud->empty())
+        pcl::io::savePCDFileBinary(scene_comp.result_path + "/" + scene_comp.ref_scene + "-" + scene_comp.curr_scene + ".pcd", *ref_GT_cloud);
+    if (!curr_GT_cloud->empty())
+        pcl::io::savePCDFileBinary(scene_comp.result_path + "/" + scene_comp.curr_scene + "-" + scene_comp.ref_scene + ".pcd", *curr_GT_cloud);
 
     GTLabeledClouds gt_labeled_clouds;
     gt_labeled_clouds.ref_GT_cloud = ref_GT_cloud;
@@ -1021,3 +927,180 @@ void mergeObjectIntoMap (std::map<std::string, int> & global_map, std::string lo
         global_map[local_vec] += 1;
 }
 
+std::vector<DetObject> checkNovelObjects(GTCloudsAndNumbers gt_cloud_numbers, std::vector<DetObject> det_object_vec,
+                                         Measurements &result, Measurements &FP_results, std::map<std::string, int> &tp_class_object_count) {
+    //extract GT new objects and compute a center point
+    std::vector<DetObject> gt_new_objects;
+    for (const GTObject gt_new_obj : gt_cloud_numbers.curr_objects) {
+        if (gt_new_obj.class_label == ObjectClass::NEW) {
+            PointXYZ center_point = computeMeanPoint(gt_new_obj.object_cloud);
+            DetObject obj {gt_new_obj.name, center_point};
+            gt_new_objects.push_back(obj);
+        }
+    }
+    //addObjectsToCloud(all_GT_curr_objects_as_point, gt_new_objects);
+
+
+    //for each detected new object, check if there is a new GT object close by
+    std::vector<DetObject> rem_new_det_obj;
+    for (DetObject det_obj : det_object_vec) {
+        //find the closest GT and check the distance
+        int closest_idx = findClosestObject(gt_new_objects, det_obj);
+        if (closest_idx >= 0) {
+            result.nr_novel_obj++;
+            mergeObjectIntoMap(tp_class_object_count, gt_new_objects[closest_idx].label);
+            gt_new_objects.erase(gt_new_objects.begin() + closest_idx);
+        } else {
+            rem_new_det_obj.push_back(det_obj);
+        }
+    }
+    FP_results.nr_novel_obj += rem_new_det_obj.size();
+    return gt_new_objects;
+}
+
+std::vector<DetObject> checkRemovedObjects(GTCloudsAndNumbers gt_cloud_numbers, std::vector<DetObject> det_object_vec,
+                                           Measurements &result, Measurements &FP_results, std::map<std::string, int> &tp_class_object_count) {
+    std::vector<DetObject> gt_removed_objects;
+    for (const GTObject gt_removed_obj : gt_cloud_numbers.ref_objects) {
+        if (gt_removed_obj.class_label == ObjectClass::REMOVED) {
+            PointXYZ center_point = computeMeanPoint(gt_removed_obj.object_cloud);
+            DetObject obj {gt_removed_obj.name, center_point};
+            gt_removed_objects.push_back(obj);
+        }
+    }
+    //addObjectsToCloud(all_GT_ref_objects_as_point, gt_removed_objects);
+
+    //for each detected new object, check if there is a new GT object close by
+    std::vector<DetObject> rem_removed_det_obj;
+    for (DetObject det_obj : det_object_vec) {
+        //find the closest GT and check the distance
+        int closest_idx = findClosestObject(gt_removed_objects, det_obj);
+        if (closest_idx >= 0) {
+            result.nr_removed_obj++;
+            mergeObjectIntoMap(tp_class_object_count, gt_removed_objects[closest_idx].label);
+            gt_removed_objects.erase(gt_removed_objects.begin() + closest_idx);
+        } else {
+            rem_removed_det_obj.push_back(det_obj);
+        }
+    }
+    FP_results.nr_removed_obj += rem_removed_det_obj.size();
+    return gt_removed_objects;
+}
+
+std::vector<AssociatedObjects> checkDisplacedObjects(GTCloudsAndNumbers gt_cloud_numbers, std::vector<AssociatedObjects> det_moved_associations,
+                                                     Measurements &result, Measurements &FP_results, std::map<std::string, int> &tp_class_object_count)  {
+    //extract GT new objects and compute a center point
+    std::vector<AssociatedObjects> gt_displaced_objects;
+    for (const GTObject gt_ref_displaced_obj : gt_cloud_numbers.ref_objects) {
+        if (gt_ref_displaced_obj.class_label >= 1000 && gt_ref_displaced_obj.class_label <= 1950) { //DISPLACED
+            /// find the corresponding curr object
+            std::vector<GTObject>::const_iterator curr_it = find_if(gt_cloud_numbers.curr_objects.begin(), gt_cloud_numbers.curr_objects.end(),
+                                                                    [gt_ref_displaced_obj](const GTObject curr_obj){return gt_ref_displaced_obj.class_label == curr_obj.class_label;});
+            PointXYZ ref_center_point = computeMeanPoint(gt_ref_displaced_obj.object_cloud);
+            DetObject obj_ref {gt_ref_displaced_obj.name, ref_center_point};
+            PointXYZ curr_center_point = computeMeanPoint(curr_it->object_cloud);
+            DetObject obj_curr {curr_it->name, curr_center_point};
+            AssociatedObjects ass_obj {obj_ref, obj_curr};
+            gt_displaced_objects.push_back(ass_obj);
+
+            //addObjectsToCloud(all_GT_ref_objects_as_point, {obj_ref});
+            //addObjectsToCloud(all_GT_curr_objects_as_point, {obj_curr});
+        }
+    }
+
+    //for each detected static object pair, check if there is a static GT object pair close by
+    std::vector<DetObject> rem_ref_displaced_det_obj, rem_curr_displaced_det_obj;
+    for (AssociatedObjects det_obj : det_moved_associations) {
+        //find the closest GT and check the distance
+        int closest_idx = findClosestObjectAssociation(gt_displaced_objects, det_obj);
+        if (closest_idx >= 0) {
+            result.nr_moved_obj += 2;
+            mergeObjectIntoMap(tp_class_object_count, gt_displaced_objects[closest_idx].ref_obj.label);
+            mergeObjectIntoMap(tp_class_object_count, gt_displaced_objects[closest_idx].curr_obj.label);
+            gt_displaced_objects.erase(gt_displaced_objects.begin() + closest_idx);
+        } else {
+            rem_ref_displaced_det_obj.push_back(det_obj.ref_obj);
+            rem_curr_displaced_det_obj.push_back(det_obj.curr_obj);
+        }
+    }
+    FP_results.nr_moved_obj += rem_ref_displaced_det_obj.size();
+    FP_results.nr_moved_obj += rem_curr_displaced_det_obj.size();
+
+    return gt_displaced_objects;
+}
+
+void checkStaticObjects(GTCloudsAndNumbers gt_cloud_numbers, std::vector<AssociatedObjects> det_static_associations,
+                        std::vector<DetObject> gt_rem_new_objects, std::vector<DetObject> gt_rem_removed_objects, std::vector<AssociatedObjects> gt_rem_displaced_objects,
+                        Measurements &result, Measurements &FP_results, std::map<std::string, int> &tp_class_object_count)  {
+    //extract GT new objects and compute a center point
+    std::vector<AssociatedObjects> gt_static_objects;
+    for (const GTObject gt_ref_static_obj : gt_cloud_numbers.ref_objects) {
+        if (gt_ref_static_obj.class_label >= 20 && gt_ref_static_obj.class_label <= 950) { //STATIC
+            /// find the corresponding curr object
+            std::vector<GTObject>::const_iterator curr_it = find_if(gt_cloud_numbers.curr_objects.begin(), gt_cloud_numbers.curr_objects.end(),
+                                                                    [gt_ref_static_obj](const GTObject curr_obj){return gt_ref_static_obj.class_label == curr_obj.class_label;});
+            PointXYZ ref_center_point = computeMeanPoint(gt_ref_static_obj.object_cloud);
+            DetObject obj_ref {gt_ref_static_obj.name, ref_center_point};
+            PointXYZ curr_center_point = computeMeanPoint(curr_it->object_cloud);
+            DetObject obj_curr {curr_it->name, curr_center_point};
+            AssociatedObjects ass_obj {obj_ref, obj_curr};
+            gt_static_objects.push_back(ass_obj);
+
+            //            addObjectsToCloud(all_GT_ref_objects_as_point, {obj_ref});
+            //            addObjectsToCloud(all_GT_curr_objects_as_point, {obj_curr});
+        }
+    }
+
+    //for each detected static object pair, check if there is a static GT object pair close by
+    std::vector<DetObject> rem_ref_static_det_obj, rem_curr_static_det_obj;
+    for (AssociatedObjects det_obj : det_static_associations) {
+        //find the closest GT and check the distance
+        int closest_idx = findClosestObjectAssociation(gt_static_objects, det_obj);
+        if (closest_idx >= 0) {
+            result.nr_static_obj += 2;
+            mergeObjectIntoMap(tp_class_object_count, gt_static_objects[closest_idx].ref_obj.label);
+            mergeObjectIntoMap(tp_class_object_count, gt_static_objects[closest_idx].curr_obj.label);
+            gt_static_objects.erase(gt_static_objects.begin() + closest_idx);
+        } else {
+            rem_ref_static_det_obj.push_back(det_obj.ref_obj);
+            rem_curr_static_det_obj.push_back(det_obj.curr_obj);
+        }
+    }
+
+    //special case for static objects - remaining objects are not necesarely FPs, but background objects that were detected
+    //for all remaining (not matched GT objects) check if there is one close by to the not matched static objects
+    std::vector<DetObject> ref_all_remaining_GT_objects, curr_all_remaining_GT_objects;
+    ref_all_remaining_GT_objects.insert(ref_all_remaining_GT_objects.begin(), gt_rem_removed_objects.begin(), gt_rem_removed_objects.end());
+    curr_all_remaining_GT_objects.insert(curr_all_remaining_GT_objects.begin(), gt_rem_new_objects.begin(), gt_rem_new_objects.end());
+    for (AssociatedObjects ass_obj : gt_rem_displaced_objects) {
+        ref_all_remaining_GT_objects.push_back(ass_obj.ref_obj);
+        curr_all_remaining_GT_objects.push_back(ass_obj.curr_obj);
+    }
+    for (DetObject det_obj : rem_ref_static_det_obj) {
+        //find the closest GT and check the distance
+        int closest_idx = findClosestObject(ref_all_remaining_GT_objects, det_obj);
+        if (closest_idx >= 0) {
+            FP_results.nr_static_obj += 1;
+            ref_all_remaining_GT_objects.erase(ref_all_remaining_GT_objects.begin() + closest_idx);
+        }
+    }
+    for (DetObject det_obj : rem_curr_static_det_obj) {
+        //find the closest GT and check the distance
+        int closest_idx = findClosestObject(curr_all_remaining_GT_objects, det_obj);
+        if (closest_idx >= 0) {
+            FP_results.nr_static_obj += 1;
+            curr_all_remaining_GT_objects.erase(curr_all_remaining_GT_objects.begin() + closest_idx);
+        }
+    }
+
+}
+
+//ycbv classes file contains only the name of the class withouth the ID prefix
+bool isYCBVObject(std::vector<std::string> ycbv_classes, std::string obj_name) {
+    for (std::string ycbv_name : ycbv_classes)
+    {
+        if (obj_name.find(ycbv_name) != std::string::npos) //this would not work if skillet would be in the YCBV set because skillet and skillet_lid exist
+            return true;
+    }
+    return false;
+}

@@ -1,6 +1,3 @@
-//#include "rtabmap/core/RtabmapExp.h" // DLL export/import defines
-//#include "rtabmap/core/Memory.h" // DLL export/import defines
-
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -18,6 +15,10 @@
 #include <boost/filesystem.hpp>
 #include <tuple>
 
+#include <pcl/io/pcd_io.h>
+#include <pcl/surface/convex_hull.h>
+#include <pcl/filters/crop_hull.h>
+
 #include "json.hpp"
 using json = nlohmann::json;
 
@@ -34,6 +35,14 @@ inline bool uIsFinite(const T& value)
 #endif
 }
 
+bool ycbv=true; //this is only used to read the valid object names from a file
+float score_thr = 0.9;
+std::string path = "/home/edith/liebnas_mnt/PlaneReconstructions/";
+std::vector<std::string> rooms = {"GH30_office", "GH30_living", "GH30_kitchen", "Arena", "KennyLab"};
+/// the postfix of the folder where the json file is stored, e.g. rgb00000_detections_fv1
+std::string det_postfix = "_detections_ycbv_fv1/"; //"_detections_ycbv/";
+///the folder where the result should be stored
+std::string postfix_result = "/baseline_result_ycbv_fv1/"; //"/baseline_result_fv1/ //"/baseline_result_ycb/ "/baseline_result_ycb_fv1/
 
 
 struct PointXYZ { float x; float y; float z; };
@@ -283,538 +292,598 @@ struct DetObject {
 };
 
 
-void drawPred(int classId, float conf, int left, int top, int right, int bottom, Mat& frame, vector<string> classes);
+typedef Eigen::Matrix<float,4,1,Eigen::DontAlign> Vector4f_NotAligned;
+struct Plane {
+    PointXYZ center_point;
+    Vector4f_NotAligned plane_coeffs;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr convex_hull_cloud;
+};
+
 std::map<int, DetObject> readInputData(std::vector<std::tuple<std::string, std::string>> association_freiburg_vec);
 string getMaxVotedLabel(CandObj& m);
+std::vector <Plane> convexHullPtsParser(std::string path);
+bool isDetObjectOnPlane(std::vector<Plane> planes, Point3d object_point);
 
 
 int main(int argc, char** argv)
 {
     std::chrono::steady_clock::time_point begin_total = std::chrono::steady_clock::now();
 
-    //TODO
-    std::string scene_path = argv[1];
-    float xi = 0;// = atof(argv[4]);
-    float yi = 0; // = atof(argv[5]);
-    float zi = 0; // = atof(argv[6]);
-    float roll = 0; // = atof(argv[7]);
-    float pitch = 0; // = atof(argv[8]);
-    float yaw = 0; // = atof(argv[9]);
-    //cout << xi << " " << yi << " " << zi << " " << roll << " " << pitch << " " << yaw << endl;
+    float xi = 0;
+    float yi = 0;
+    float zi = 0;
+    float roll = 0;
+    float pitch = 0;
+    float yaw = 0;
 
-    // TODO
-    //freiburg-file (fusedPoses_i100_biggerLambda) and associations.txt needed. Skip first line in both files and then the lines can be read one after the other
-    //use rgb id as key (to find the pre-computed detections) and save the path to rgb and depth frame
-    std::vector<std::tuple<std::string, std::string> > association_freiburg_vec; //stores for all planes the path to the freiburg and association file
-    const std::regex ass_filter("associations_[0-9]+.txt");
-    std::string planes_path = scene_path + "/planes/";
-    for(auto & plane_folder_path : boost::filesystem::directory_iterator(planes_path))
-    {
-        if (boost::filesystem::is_directory(plane_folder_path.status()))
-        {
-            for(auto & plane_files : boost::filesystem::directory_iterator(plane_folder_path)) {
-                if(std::regex_match(plane_files.path().filename().string(), ass_filter ) ) {
-                    std::string ass_name = plane_files.path().stem().string();
-                    std::string ass_nr = ass_name.substr(ass_name.find_last_of("_")+1);
-                    std::string freiburg_path = plane_folder_path.path().string() + "/table_" + ass_nr + "_fusedPoses_i100_biggerLambda.freiburg";
-                    if (!boost::filesystem::exists(freiburg_path)) {
-                        std::cerr << "Couldn't find file " << freiburg_path << std::endl;
+    for (std::string r : rooms) {
+        //extract all scene folders
+        std::string room_path = path + "/" + r;
+        if (!boost::filesystem::exists(room_path) || !boost::filesystem::is_directory(room_path)) {
+            std::cout << room_path << " does not exist or is not a directory" << std::endl;
+            return -1;
+        }
+
+        for (boost::filesystem::directory_entry& scene : boost::filesystem::directory_iterator(room_path)) {
+            if (boost::filesystem::is_directory(scene)) {
+                std::string scene_path = scene.path().string();
+                if (scene_path.find("scene", scene_path.length()-8) !=std::string::npos) {
+                    std::cout << "Compute 3d_object_map for " << scene_path << std::endl;
+                    //freiburg-file (fusedPoses_i100_biggerLambda) and associations.txt needed. Skip first line in both files and then the lines can be read one after the other
+                    //use rgb id as key (to find the pre-computed detections) and save the path to rgb and depth frame
+                    std::vector<std::tuple<std::string, std::string> > association_freiburg_vec; //stores for all planes the path to the freiburg and association file
+                    const std::regex ass_filter("associations_[0-9]+.txt");
+                    std::string planes_path = scene_path + "/planes/";
+                    //e.g. scene1
+                    if (!boost::filesystem::exists(planes_path) || !boost::filesystem::is_directory(planes_path)) {
+                        continue;
                     }
-                    std::tuple<std::string, std::string> ass_freiburg = std::make_tuple(plane_files.path().string(), freiburg_path);
-                    association_freiburg_vec.push_back(ass_freiburg);
-                }
-            }
-        }
-    }
 
-    std::map<int, DetObject> input_data = readInputData(association_freiburg_vec);
-
-    //intrinsics from Sasha's Asus camera
-    Intrinsics intrinsics = Intrinsics();
-    intrinsics.fx = 538.391;
-    intrinsics.fy = 538.085;
-    intrinsics.cx = 315.307;
-    intrinsics.cy = 233.048;
-    intrinsics.height = 480;
-    intrinsics.width = 640;
-
-
-    map<int, vector<LabelPos>> idLabelMap;
-    map<string, vector<IdPos>> labelIdMap;
-    map<int, CandObj> candObjMap;
-
-
-    vector<string> classes;
-
-    string classesFile = "/home/edith/Projects/SpatioTemporal3DObject_Baseline/valid_classes.txt";
-
-    ifstream ifs(classesFile.c_str());
-    string line;
-    while (getline(ifs, line)){
-        if (line.rfind("#", 0) != 0)
-            classes.push_back(line);
-    }
-    ifs.close();
-
-    // transform from camera to base
-    Transform tbc(0.00220318, -0.00605847, 0.999979, 0.216234, -0.999998, -0.000013348,
-                  0.00220314, 0.0222121, 0.0, -0.999982, -0.00605849, 1.20972);
-    tbc.setIdentity();
-
-
-
-    std::map<int, DetObject>::iterator input_it = input_data.begin();
-
-    std::chrono::steady_clock::time_point begin_obj_det = std::chrono::steady_clock::now();
-    while ((input_it != input_data.end()))
-    {
-        std::vector<cv::Mat> depth_imgs;
-        for (std::string depth_path : input_it->second.depth_paths) {
-            cv::Mat depth_img = cv::imread(depth_path, cv::IMREAD_ANYDEPTH);
-            depth_imgs.push_back(depth_img);
-        }
-
-        // read a JSON file
-        std::string detection_folder_path = (boost::filesystem::path(input_it->second.rgb_path).parent_path() /
-                                             boost::filesystem::path(input_it->second.rgb_path).stem()).string() + "_detections/";
-        std::ifstream detection_path(detection_folder_path + boost::filesystem::path(input_it->second.rgb_path).stem().string() + ".json");
-        json json_file;
-        detection_path >> json_file;
-
-        auto detections = json_file["detections"];
-        // iterate the array
-        for (json::iterator json_it = detections.begin(); json_it != detections.end(); ++json_it) {
-            auto detection = *json_it;
-            int id = detection["id"].get<int>();
-            std::string label = detection["label"].get<std::string>();
-            float score = std::stof(detection["score"].get<std::string>());
-            auto bb = detection["bb"];
-            int minX = bb["minY"].get<int>();
-            int minY = bb["minX"].get<int>();
-            int maxX = bb["maxY"].get<int>();
-            int maxY = bb["maxX"].get<int>();
-
-            //if detection is not in the list of valid classes, we reject it
-            if (std::find(classes.begin(), classes.end(), label) == classes.end())
-                continue;
-
-            //if score is less than conf, we reject the detection
-            if (score < 0.9)
-                continue;
-
-
-            Point2d bb_center(minX + (maxX-minX)/2, minY + (maxY-minY)/2);
-
-            //iterate through all depth images and check if depth point is valid
-            //if the point is invalid in all depth images, we are not interested in the detection because it is not close to the planes
-            PointXYZ p_3d_cam;
-            p_3d_cam.x = p_3d_cam.y = p_3d_cam.z = std::numeric_limits<float>::quiet_NaN();
-            for (cv::Mat depth_img : depth_imgs) {
-                PointXYZ p_ = projectDepthTo3D(depth_img, bb_center.x, bb_center.y,
-                                               intrinsics.cx, intrinsics.cy,
-                                               intrinsics.fx, intrinsics.fy,
-                                               false);
-                if (p_.x != std::numeric_limits<float>::quiet_NaN() || p_.y != std::numeric_limits<float>::quiet_NaN() && p_.z != std::numeric_limits<float>::quiet_NaN()) {
-                    p_3d_cam = p_;
-                    break;
-                }
-            }
-
-            //check for nans; the detection is not in an area we are interested in
-            if (std::isnan(p_3d_cam.x) || std::isnan(p_3d_cam.y) || std::isnan(p_3d_cam.z))
-                continue;
-
-
-            // converting p to rtabmap::Transform. it's in camera's frame
-            Transform p(p_3d_cam.x, p_3d_cam.y, p_3d_cam.z, 0, 0, 0);
-
-            // map coordinates of p: tmb * tbc * p.
-            // tmb is the transform from base to map, which is just the robot's pose.
-            //el: the poses in the freiburg-file are the camera poses in map-frame
-            Transform pm(input_it->second.tf * tbc * p);
-
-            float bb_area = (maxX-minX) *  (maxY-minY);
-
-            string fv_path = detection_folder_path + std::to_string(id) + ".feature";
-
-            if (idLabelMap[input_it->first].empty())
-                idLabelMap[input_it->first] = vector<LabelPos>();
-            LabelPos x = {label, Point3d(pm.x(), pm.y(), pm.z()), bb_center, bb_area, fv_path};
-            idLabelMap[input_it->first].push_back(x);
-
-            if (labelIdMap[label].empty())
-                labelIdMap[label] = vector<IdPos>();
-            IdPos z = {input_it->first, Point3d(pm.x(), pm.y(), pm.z()), bb_center, bb_area};
-            labelIdMap[label].push_back(z);
-        }
-
-        input_it++;
-    }
-    std::chrono::steady_clock::time_point end_obj_det = std::chrono::steady_clock::now();
-    //std::cout << "Time difference obj_det = " <<
-    //    std::chrono::duration_cast<std::chrono::milliseconds>(end_obj_det - begin_obj_det).count()
-    //    << "[ms]" << std::endl;
-
-
-
-    std::chrono::steady_clock::time_point begin_temp = std::chrono::steady_clock::now();
-    int lastId = -1;
-    int lastId2 = -1;
-    int lastId3 = -1;
-
-    // area threshold. if there is a change of less than aTh in the bb area,
-    // in different frames, it's probably the same object
-    float aTh = 0.2; //0.3
-
-    // real world distance threshold in meters
-    float dTh = 0.3;//0.8; // 1.0
-    //float dTh = 7; // 1.0
-
-
-    // bb center threshold
-    //el: value used in paper is 0.0005 --> 154 px
-    double bbcTh = 0.0001 * (640 * 480); // 30 px
-
-    //int cnt = 0;
-    //while (it2 != idLabelMap.end())
-    input_it = input_data.begin();
-    while (input_it != input_data.end())
-    {
-        int currId = input_it->first;
-        //cout << "id " << currId << endl;
-        //cout << "labels pos " << endl;
-        //vector<LabelPos> v = it2->second;
-        vector<LabelPos> v = idLabelMap[currId];
-        // if first frame, all detected objects are candidates.
-        if (candObjMap.empty())
-        {
-            for (int i = 0; i < v.size(); i++)
-            {
-                LabelPos currLabelPos = v[i];
-
-                candObjMap[i].labelHist[currLabelPos.label]++;
-                candObjMap[i].ids.insert(currId);
-                candObjMap[i].pm = currLabelPos.pm;
-                //candObjMap[i].pm.push_back(currLabelPos.pm);
-                candObjMap[i].cbb = currLabelPos.cbb;
-                candObjMap[i].area = currLabelPos.area;
-                candObjMap[i].feature_vector_paths.push_back(currLabelPos.feature_vector_path);
-                //cout << v[i].label << " " << v[i].cbb.x << " " << v[i].cbb.y
-                //<< " " << v[i].area << endl;
-            }
-        }
-        // from the second frame on, now we need to check objects association
-        else
-            //else if (it2 != idLabelMap.begin())
-        {
-            set<int> prohibitedCands;
-            if (currId == 3540)
-                cout << endl;
-            for (int i = 0; i < v.size(); i++)
-            {
-                LabelPos currLabelPos = v[i];
-                int j = 0;
-                bool hasSameLabel = false;
-                int index = -1;
-                for (j = 0; j < candObjMap.size(); j++)
-                {
-                    set<int> currSet = candObjMap[j].ids;
-                    //if ((currSet.find(lastId) != currSet.end()) || (currSet.find(lastId2) != currSet.end()))
-                    if (((currSet.find(lastId) != currSet.end()) || (currSet.find(lastId2) != currSet.end())
-                         || (currSet.find(lastId3) != currSet.end()))
-                            && (prohibitedCands.find(j) == prohibitedCands.end()))
+                    for(auto & plane_folder_path : boost::filesystem::directory_iterator(planes_path))
                     {
-                        float dist = sqrt(powf(candObjMap[j].cbb.x - currLabelPos.cbb.x, 2) +
-                                          powf(candObjMap[j].cbb.y - currLabelPos.cbb.y, 2));
-                        if (dist < bbcTh && (fabs(candObjMap[j].area - currLabelPos.area)/currLabelPos.area < aTh))
+                        if (boost::filesystem::is_directory(plane_folder_path.status()))
                         {
-                            if (currLabelPos.label == getMaxVotedLabel(candObjMap[j]))
-                            {
-                                hasSameLabel = true;
-                                candObjMap[j].ids.insert(currId);
-                                candObjMap[j].area = (candObjMap[j].area + currLabelPos.area) / 2;
-                                candObjMap[j].labelHist[currLabelPos.label]++;
-                                //candObjMap[j].pm = (candObjMap[j].pm + currLabelPos.pm) / 2;
-                                candObjMap[j].pm.x = candObjMap[j].pm.x +
-                                        (currLabelPos.pm.x - candObjMap[j].pm.x)/candObjMap[j].ids.size();
-                                candObjMap[j].pm.y = candObjMap[j].pm.y +
-                                        (currLabelPos.pm.y - candObjMap[j].pm.y)/candObjMap[j].ids.size();
-                                candObjMap[j].pm.z = candObjMap[j].pm.z +
-                                        (currLabelPos.pm.z - candObjMap[j].pm.z)/candObjMap[j].ids.size();
-                                candObjMap[j].cbb = currLabelPos.cbb;
-                                candObjMap[j].feature_vector_paths.push_back(currLabelPos.feature_vector_path);
-                                prohibitedCands.insert(j);
-                                break;
+                            for(auto & plane_files : boost::filesystem::directory_iterator(plane_folder_path)) {
+                                if(std::regex_match(plane_files.path().filename().string(), ass_filter ) ) {
+                                    std::string ass_name = plane_files.path().stem().string();
+                                    std::string ass_nr = ass_name.substr(ass_name.find_last_of("_")+1);
+                                    std::string freiburg_path = plane_folder_path.path().string() + "/table_" + ass_nr + "_fusedPoses_i100_biggerLambda.freiburg";
+                                    if (!boost::filesystem::exists(freiburg_path)) {
+                                        std::cerr << "Couldn't find file " << freiburg_path << std::endl;
+                                    }
+                                    std::tuple<std::string, std::string> ass_freiburg = std::make_tuple(plane_files.path().string(), freiburg_path);
+                                    association_freiburg_vec.push_back(ass_freiburg);
+                                }
                             }
-                            else
-                                index = j;
                         }
                     }
-                }
-                // if j loop reached the end without breaking, it means that
-                // there was no association. thus, candObjMap grows
-                if (j == candObjMap.size())
-                {
-                    if (index == -1)
-                    {
-                        candObjMap[j].ids.insert(currId);
-                        candObjMap[j].area = currLabelPos.area;
-                        candObjMap[j].labelHist[currLabelPos.label]++;
-                        candObjMap[j].pm = currLabelPos.pm;
-                        candObjMap[j].cbb = currLabelPos.cbb;
-                        candObjMap[j].feature_vector_paths.push_back(currLabelPos.feature_vector_path);
-                    }
+
+                    std::string plane_log_path = scene_path + "/table.txt";
+                    std::vector<Plane> planes = convexHullPtsParser(plane_log_path);
+
+                    std::map<int, DetObject> input_data = readInputData(association_freiburg_vec);
+
+                    //intrinsics from Sasha's Asus camera
+                    Intrinsics intrinsics = Intrinsics();
+                    intrinsics.fx = 538.391;
+                    intrinsics.fy = 538.085;
+                    intrinsics.cx = 315.307;
+                    intrinsics.cy = 233.048;
+                    intrinsics.height = 480;
+                    intrinsics.width = 640;
+
+
+                    map<int, vector<LabelPos>> idLabelMap;
+                    map<string, vector<IdPos>> labelIdMap;
+                    map<int, CandObj> candObjMap;
+
+
+                    vector<string> classes;
+
+                    string classesFile;
+                    if (!ycbv)
+                        classesFile = "/home/edith/Projects/SpatioTemporal3DObject_Baseline/COCO_valid_classes.txt";
                     else
-                    {
-                        candObjMap[index].ids.insert(currId);
-                        candObjMap[index].area = (candObjMap[index].area + currLabelPos.area) / 2;
-                        candObjMap[index].labelHist[currLabelPos.label]++;
-                        //candObjMap[index].pm = (candObjMap[index].pm + currLabelPos.pm) / 2;
-                        candObjMap[index].pm.x = candObjMap[index].pm.x +
-                                (currLabelPos.pm.x - candObjMap[index].pm.x)/candObjMap[index].ids.size();
-                        candObjMap[index].pm.y = candObjMap[index].pm.y +
-                                (currLabelPos.pm.y - candObjMap[index].pm.y)/candObjMap[index].ids.size();
-                        candObjMap[index].pm.z = candObjMap[index].pm.z +
-                                (currLabelPos.pm.z - candObjMap[index].pm.z)/candObjMap[index].ids.size();
-                        candObjMap[index].cbb = currLabelPos.cbb;
-                        candObjMap[index].feature_vector_paths.push_back(currLabelPos.feature_vector_path);
-                        prohibitedCands.insert(index);
+                        classesFile = "/home/edith/Projects/SpatioTemporal3DObject_Baseline/YCBV_valid_classes.txt";
+
+                    ifstream ifs(classesFile.c_str());
+                    string line;
+                    while (getline(ifs, line)){
+                        if (line.rfind("#", 0) != 0)
+                            classes.push_back(line);
                     }
-                }
-            }
-        }
-        lastId3 = lastId2;
-        lastId2 = lastId;
-        lastId = currId;
-        //it2++;
-        input_it++;
-    }
+                    ifs.close();
+
+                    // transform from camera to base
+                    Transform tbc(0.00220318, -0.00605847, 0.999979, 0.216234, -0.999998, -0.000013348,
+                                  0.00220314, 0.0222121, 0.0, -0.999982, -0.00605849, 1.20972);
+                    tbc.setIdentity();
 
 
 
-    std::chrono::steady_clock::time_point end_temp = std::chrono::steady_clock::now();
-    //std::cout << "Time difference temporal association = " <<
-    //    std::chrono::duration_cast<std::chrono::milliseconds>(end_temp - begin_temp).count()
-    //    << "[ms]" << std::endl;
-    //std::cout << "Time difference temporal association = " <<
-    //    std::chrono::duration_cast<std::chrono::microseconds>(end_temp - begin_temp).count()
-    //    << "[us]" << std::endl;
+                    std::map<int, DetObject>::iterator input_it = input_data.begin();
 
-    //cout << "000" << endl;
-
-    //cout << "CANDOBJMAP size " << candObjMap.size() << endl;
-
-
-    // now to the spatial association
-    //
-    std::chrono::steady_clock::time_point begin_spat = std::chrono::steady_clock::now();
-
-    map<string, CandObj> newCandObjMap;
-    candObjMap[0].label = getMaxVotedLabel(candObjMap[0]);
-
-    map<string, int> labelCount;
-    bool match = false;
-    int minQty = 3;
-
-    for (auto it = candObjMap.begin(); it != candObjMap.end();)
-    {
-        //cout << candObjMap.size() << endl;
-        CandObj currCand = it->second;
-        if (currCand.ids.size() < minQty)
-        {
-            it = candObjMap.erase(it);
-            continue;
-        }
-        currCand.label = getMaxVotedLabel(currCand);
-        //cout << currCand.label << endl;
-        if (labelCount.find(currCand.label) == labelCount.end())
-            labelCount[currCand.label] = 0;
-        //for (int k = j+1; k < candObjMap.size(); k++)
-        for (auto itt = next(it, 1); itt != candObjMap.end();)
-        {
-            bool erased = false;
-            //CandObj testCand = candObjMap[k];
-            CandObj testCand = itt->second;
-            if (testCand.label.empty())
-                testCand.label = getMaxVotedLabel(testCand);
-            if (testCand.ids.size() < minQty)
-            {
-                itt = candObjMap.erase(itt);
-                continue;
-            }
-            set<int> intersect;
-            set_intersection(testCand.ids.begin(), testCand.ids.end(), currCand.ids.begin(),
-                             currCand.ids.end(), inserter(intersect, intersect.begin()));
-            //if (currCand.label == testCand.label)
-            if ((currCand.label == testCand.label) && (intersect.empty()))
-
-            {
-                float dist = sqrt(powf(currCand.pm.x - testCand.pm.x, 2) +
-                                  powf(currCand.pm.y - testCand.pm.y, 2) +
-                                  powf(currCand.pm.z - testCand.pm.z, 2));
-                //if ((dist <= dTh) || (dist <= 0.1*sqrt(currCand.area)))
-                if (dist <= dTh)
-                    //if (dist <= (m*currCand.area/(480*640) + b))
-                {
-                    CandObj tmp;
-                    tmp.ids.insert(currCand.ids.begin(), currCand.ids.end());
-                    tmp.ids.insert(testCand.ids.begin(), testCand.ids.end());
-                    tmp.label = currCand.label;
-                    //tmp.pm = (currCand.pm + testCand.pm) / 2;
-
-                    float cWeight = (float)(currCand.ids.size()) / ((float)currCand.ids.size() + testCand.ids.size());
-                    float tWeight = (float)(testCand.ids.size()) / ((float)currCand.ids.size() + testCand.ids.size());
-                    tmp.pm = (cWeight * currCand.pm + tWeight * testCand.pm)/(cWeight + tWeight);
-                    tmp.area = (currCand.area + testCand.area) / 2;
-
-                    tmp.feature_vector_paths.insert(tmp.feature_vector_paths.end(), currCand.feature_vector_paths.begin(), currCand.feature_vector_paths.end());
-                    tmp.feature_vector_paths.insert(tmp.feature_vector_paths.end(), testCand.feature_vector_paths.begin(), testCand.feature_vector_paths.end());
-
-                    string name = currCand.label + to_string(labelCount[currCand.label]);
-                    string prevName = currCand.label + to_string(labelCount[currCand.label]-1);
-
-                    //cout << "currcandobj " << currCand.obj << endl;
-                    //cout << "testcandobj " << testCand.obj << endl;
-                    if (newCandObjMap.find(prevName) == newCandObjMap.end())
+                    std::chrono::steady_clock::time_point begin_obj_det = std::chrono::steady_clock::now();
+                    while ((input_it != input_data.end()))
                     {
-                        //cout << prevName << endl;
-                        newCandObjMap[name] = tmp;
-                        labelCount[currCand.label]++;
-                        currCand.obj = name;
-                        tmp.obj = name;
-                    }
-                    else
-                    {
-                        map<string, CandObj>::iterator itn = newCandObjMap.begin();
-                        while(itn != newCandObjMap.end())
-                        {
-                            CandObj nco = itn->second;
-                            string inst = itn->first;
-                            if (inst == currCand.obj)
-                            {
-                                //cout << "inst= " << inst << endl;
-                                newCandObjMap[currCand.obj] = tmp;
-                                tmp.obj = inst;
-                                break;
+                        std::vector<cv::Mat> depth_imgs;
+                        for (std::string depth_path : input_it->second.depth_paths) {
+                            cv::Mat depth_img = cv::imread(depth_path, cv::IMREAD_ANYDEPTH);
+                            depth_imgs.push_back(depth_img);
+                        }
+
+                        // read a JSON file
+                        std::string detection_folder_path;
+                        detection_folder_path = (boost::filesystem::path(input_it->second.rgb_path).parent_path() /
+                                                 boost::filesystem::path(input_it->second.rgb_path).stem()).string() + det_postfix;
+                        std::ifstream detection_path(detection_folder_path + boost::filesystem::path(input_it->second.rgb_path).stem().string() + ".json");
+                        json json_file;
+                        detection_path >> json_file;
+
+                        auto detections = json_file["detections"];
+                        // iterate the array
+                        for (json::iterator json_it = detections.begin(); json_it != detections.end(); ++json_it) {
+                            auto detection = *json_it;
+                            int id = detection["id"].get<int>();
+                            std::string label = detection["label"].get<std::string>();
+                            float score = std::stof(detection["score"].get<std::string>());
+                            auto bb = detection["bb"];
+                            int minX = bb["minY"].get<int>();
+                            int minY = bb["minX"].get<int>();
+                            int maxX = bb["maxY"].get<int>();
+                            int maxY = bb["maxX"].get<int>();
+
+                            //if detection is not in the list of valid classes, we reject it
+                            if (std::find(classes.begin(), classes.end(), label) == classes.end())
+                                continue;
+
+                            //if score is less than conf, we reject the detection
+                            if (score < score_thr)
+                                continue;
+
+
+                            Point2d bb_center(minX + (maxX-minX)/2, minY + (maxY-minY)/2);
+
+                            //iterate through all depth images and check if depth point is valid
+                            //if the point is invalid in all depth images, we are not interested in the detection because it is not close to the planes
+                            PointXYZ p_3d_cam;
+                            p_3d_cam.x = p_3d_cam.y = p_3d_cam.z = std::numeric_limits<float>::quiet_NaN();
+                            for (cv::Mat depth_img : depth_imgs) {
+                                PointXYZ p_ = projectDepthTo3D(depth_img, bb_center.x, bb_center.y,
+                                                               intrinsics.cx, intrinsics.cy,
+                                                               intrinsics.fx, intrinsics.fy,
+                                                               false);
+                                if (!std::isnan(p_.x) && !std::isnan(p_.y)  && !std::isnan(p_.z)  ) {
+                                    p_3d_cam = p_;
+                                    break;
+                                }
                             }
-                            itn++;
+
+                            //check for nans; the detection is not in an area we are interested in
+                            if (std::isnan(p_3d_cam.x) || std::isnan(p_3d_cam.y) || std::isnan(p_3d_cam.z))
+                                continue;
+
+
+                            // converting p to rtabmap::Transform. it's in camera's frame
+                            Transform p(p_3d_cam.x, p_3d_cam.y, p_3d_cam.z, 0, 0, 0);
+
+                            // map coordinates of p: tmb * tbc * p.
+                            // tmb is the transform from base to map, which is just the robot's pose.
+                            //el: the poses in the freiburg-file are the camera poses in map-frame
+                            Transform pm(input_it->second.tf * tbc * p);
+                            Point3d pos_map(pm.x(), pm.y(), pm.z());
+
+                            //check if the object is placed on one of the planes extracted
+                            //if (!isDetObjectOnPlane(planes, pos_map))
+                            if (pos_map.z < 0.3)
+                                continue;
+
+                            float bb_area = (maxX-minX) *  (maxY-minY);
+
+                            string fv_path = detection_folder_path + std::to_string(id) + ".feature";
+
+                            if (idLabelMap[input_it->first].empty())
+                                idLabelMap[input_it->first] = vector<LabelPos>();
+                            LabelPos x = {label, pos_map, bb_center, bb_area, fv_path};
+                            idLabelMap[input_it->first].push_back(x);
+
+                            if (labelIdMap[label].empty())
+                                labelIdMap[label] = vector<IdPos>();
+                            IdPos z = {input_it->first, pos_map, bb_center, bb_area};
+                            labelIdMap[label].push_back(z);
                         }
 
-                        if (itn == newCandObjMap.end())
+                        input_it++;
+                    }
+                    std::chrono::steady_clock::time_point end_obj_det = std::chrono::steady_clock::now();
+                    //std::cout << "Time difference obj_det = " <<
+                    //    std::chrono::duration_cast<std::chrono::milliseconds>(end_obj_det - begin_obj_det).count()
+                    //    << "[ms]" << std::endl;
+
+
+
+                    std::chrono::steady_clock::time_point begin_temp = std::chrono::steady_clock::now();
+                    int lastId = -1;
+                    int lastId2 = -1;
+                    int lastId3 = -1;
+
+                    // area threshold. if there is a change of less than aTh in the bb area,
+                    // in different frames, it's probably the same object
+                    float aTh = 0.2; //0.3
+
+                    // real world distance threshold in meters
+                    float dTh = 0.3;//0.8; // 1.0
+                    //float dTh = 7; // 1.0
+
+
+                    // bb center threshold
+                    //el: value used in paper is 0.0005 --> 154 px
+                    double bbcTh = 0.0001 * (640 * 480); // 30 px
+
+                    //int cnt = 0;
+                    //while (it2 != idLabelMap.end())
+                    input_it = input_data.begin();
+                    while (input_it != input_data.end())
+                    {
+                        int currId = input_it->first;
+                        //cout << "id " << currId << endl;
+                        //cout << "labels pos " << endl;
+                        //vector<LabelPos> v = it2->second;
+                        vector<LabelPos> v = idLabelMap[currId];
+                        // if first frame, all detected objects are candidates.
+                        if (candObjMap.empty())
                         {
-                            //cout << "fora while = " << name << endl;
-                            tmp.obj = name;
-                            newCandObjMap[name] = tmp;
-                            labelCount[currCand.label]++;
-                            tmp.obj = name;
-                            currCand.obj = name;
+                            for (int i = 0; i < v.size(); i++)
+                            {
+                                LabelPos currLabelPos = v[i];
+
+                                candObjMap[i].labelHist[currLabelPos.label]++;
+                                candObjMap[i].ids.insert(currId);
+                                candObjMap[i].pm = currLabelPos.pm;
+                                //candObjMap[i].pm.push_back(currLabelPos.pm);
+                                candObjMap[i].cbb = currLabelPos.cbb;
+                                candObjMap[i].area = currLabelPos.area;
+                                candObjMap[i].feature_vector_paths.push_back(currLabelPos.feature_vector_path);
+                                //cout << v[i].label << " " << v[i].cbb.x << " " << v[i].cbb.y
+                                //<< " " << v[i].area << endl;
+                            }
                         }
+                        // from the second frame on, now we need to check objects association
+                        else
+                            //else if (it2 != idLabelMap.begin())
+                        {
+                            set<int> prohibitedCands;
+                            for (int i = 0; i < v.size(); i++)
+                            {
+                                LabelPos currLabelPos = v[i];
+                                int j = 0;
+                                bool hasSameLabel = false;
+                                int index = -1;
+                                for (j = 0; j < candObjMap.size(); j++)
+                                {
+                                    set<int> currSet = candObjMap[j].ids;
+                                    //if ((currSet.find(lastId) != currSet.end()) || (currSet.find(lastId2) != currSet.end()))
+                                    if (((currSet.find(lastId) != currSet.end()) || (currSet.find(lastId2) != currSet.end())
+                                         || (currSet.find(lastId3) != currSet.end()))
+                                            && (prohibitedCands.find(j) == prohibitedCands.end()))
+                                    {
+                                        float dist = sqrt(powf(candObjMap[j].cbb.x - currLabelPos.cbb.x, 2) +
+                                                          powf(candObjMap[j].cbb.y - currLabelPos.cbb.y, 2));
+                                        if (dist < bbcTh && (fabs(candObjMap[j].area - currLabelPos.area)/currLabelPos.area < aTh))
+                                        {
+                                            if (currLabelPos.label == getMaxVotedLabel(candObjMap[j]))
+                                            {
+                                                hasSameLabel = true;
+                                                candObjMap[j].ids.insert(currId);
+                                                candObjMap[j].area = (candObjMap[j].area + currLabelPos.area) / 2;
+                                                candObjMap[j].labelHist[currLabelPos.label]++;
+                                                //candObjMap[j].pm = (candObjMap[j].pm + currLabelPos.pm) / 2;
+                                                candObjMap[j].pm.x = candObjMap[j].pm.x +
+                                                        (currLabelPos.pm.x - candObjMap[j].pm.x)/candObjMap[j].ids.size();
+                                                candObjMap[j].pm.y = candObjMap[j].pm.y +
+                                                        (currLabelPos.pm.y - candObjMap[j].pm.y)/candObjMap[j].ids.size();
+                                                candObjMap[j].pm.z = candObjMap[j].pm.z +
+                                                        (currLabelPos.pm.z - candObjMap[j].pm.z)/candObjMap[j].ids.size();
+                                                candObjMap[j].cbb = currLabelPos.cbb;
+                                                candObjMap[j].feature_vector_paths.push_back(currLabelPos.feature_vector_path);
+                                                prohibitedCands.insert(j);
+                                                break;
+                                            }
+                                            else
+                                                index = j;
+                                        }
+                                    }
+                                }
+                                // if j loop reached the end without breaking, it means that
+                                // there was no association. thus, candObjMap grows
+                                if (j == candObjMap.size())
+                                {
+                                    if (index == -1)
+                                    {
+                                        candObjMap[j].ids.insert(currId);
+                                        candObjMap[j].area = currLabelPos.area;
+                                        candObjMap[j].labelHist[currLabelPos.label]++;
+                                        candObjMap[j].pm = currLabelPos.pm;
+                                        candObjMap[j].cbb = currLabelPos.cbb;
+                                        candObjMap[j].feature_vector_paths.push_back(currLabelPos.feature_vector_path);
+                                    }
+                                    else
+                                    {
+                                        candObjMap[index].ids.insert(currId);
+                                        candObjMap[index].area = (candObjMap[index].area + currLabelPos.area) / 2;
+                                        candObjMap[index].labelHist[currLabelPos.label]++;
+                                        //candObjMap[index].pm = (candObjMap[index].pm + currLabelPos.pm) / 2;
+                                        candObjMap[index].pm.x = candObjMap[index].pm.x +
+                                                (currLabelPos.pm.x - candObjMap[index].pm.x)/candObjMap[index].ids.size();
+                                        candObjMap[index].pm.y = candObjMap[index].pm.y +
+                                                (currLabelPos.pm.y - candObjMap[index].pm.y)/candObjMap[index].ids.size();
+                                        candObjMap[index].pm.z = candObjMap[index].pm.z +
+                                                (currLabelPos.pm.z - candObjMap[index].pm.z)/candObjMap[index].ids.size();
+                                        candObjMap[index].cbb = currLabelPos.cbb;
+                                        candObjMap[index].feature_vector_paths.push_back(currLabelPos.feature_vector_path);
+                                        prohibitedCands.insert(index);
+                                    }
+                                }
+                            }
+                        }
+                        lastId3 = lastId2;
+                        lastId2 = lastId;
+                        lastId = currId;
+                        //it2++;
+                        input_it++;
                     }
 
-                    itt = candObjMap.erase(itt);
-                    currCand = tmp;
-                    //k--;
-                    match = true;
-                    erased = true;
+
+                    //------------if you want to write the objects after temporal association to a file
+                    //    map<int, CandObj>::iterator c_itnc = candObjMap.begin();
+
+                    //    // final transform to align world axes from ROS and gazebo
+                    //    Transform t(xi, yi, zi, roll, pitch, yaw);
+
+                    //    std::string c_result_folder = scene_path + "/baseline_result/";
+                    //    boost::filesystem::create_directory(c_result_folder);
+
+                    //    std::ofstream c_obj_map_file;
+                    //    c_obj_map_file.open(c_result_folder + "/3d_obj_map_temporal.txt");
+
+                    //    while (c_itnc != candObjMap.end())
+                    //    {
+                    //        //cout << "label " << itnc->first << endl;
+                    //        //cout << itnc->first << " ";
+                    //        CandObj obj = c_itnc->second;
+                    //        set<int>::iterator its = obj.ids.begin();
+                    //        //cout << "ids ";
+                    //        while (its != obj.ids.end())
+                    //        {
+                    //            //cout << *its << " ";
+                    //            its++;
+                    //        }
+                    //        Transform q(obj.pm.x, obj.pm.y, obj.pm.z, 0, 0, 0);
+                    //        Transform r = t * q;
+                    //        c_obj_map_file << "[" << r.x() << "," << r.y() << "," << r.z() << "]" << ";" << getMaxVotedLabel(obj) << "\n";
+
+                    //        c_itnc++;
+                    //    }
+                    //    c_obj_map_file.close();
+
+
+
+
+                    std::chrono::steady_clock::time_point end_temp = std::chrono::steady_clock::now();
+                    //std::cout << "Time difference temporal association = " <<
+                    //    std::chrono::duration_cast<std::chrono::milliseconds>(end_temp - begin_temp).count()
+                    //    << "[ms]" << std::endl;
+                    //std::cout << "Time difference temporal association = " <<
+                    //    std::chrono::duration_cast<std::chrono::microseconds>(end_temp - begin_temp).count()
+                    //    << "[us]" << std::endl;
+
+                    //cout << "000" << endl;
+
+                    //cout << "CANDOBJMAP size " << candObjMap.size() << endl;
+
+
+                    // now to the spatial association
+                    //
+                    std::chrono::steady_clock::time_point begin_spat = std::chrono::steady_clock::now();
+
+                    map<string, CandObj> newCandObjMap;
+                    candObjMap[0].label = getMaxVotedLabel(candObjMap[0]);
+
+                    map<string, int> labelCount;
+                    bool match = false;
+                    int minQty = 3;
+
+                    for (auto it = candObjMap.begin(); it != candObjMap.end();)
+                    {
+                        //cout << candObjMap.size() << endl;
+                        CandObj currCand = it->second;
+                        if (currCand.ids.size() < minQty)
+                        {
+                            it = candObjMap.erase(it);
+                            continue;
+                        }
+                        currCand.label = getMaxVotedLabel(currCand);
+                        //cout << currCand.label << endl;
+                        if (labelCount.find(currCand.label) == labelCount.end())
+                            labelCount[currCand.label] = 0;
+                        //for (int k = j+1; k < candObjMap.size(); k++)
+                        for (auto itt = next(it, 1); itt != candObjMap.end();)
+                        {
+                            bool erased = false;
+                            //CandObj testCand = candObjMap[k];
+                            CandObj testCand = itt->second;
+                            if (testCand.label.empty())
+                                testCand.label = getMaxVotedLabel(testCand);
+                            if (testCand.ids.size() < minQty)
+                            {
+                                itt = candObjMap.erase(itt);
+                                continue;
+                            }
+                            set<int> intersect;
+                            set_intersection(testCand.ids.begin(), testCand.ids.end(), currCand.ids.begin(),
+                                             currCand.ids.end(), inserter(intersect, intersect.begin()));
+                            //if (currCand.label == testCand.label)
+                            if ((currCand.label == testCand.label) && (intersect.empty()))
+
+                            {
+                                float dist = sqrt(powf(currCand.pm.x - testCand.pm.x, 2) +
+                                                  powf(currCand.pm.y - testCand.pm.y, 2) +
+                                                  powf(currCand.pm.z - testCand.pm.z, 2));
+                                //if ((dist <= dTh) || (dist <= 0.1*sqrt(currCand.area)))
+                                if (dist <= dTh)
+                                    //if (dist <= (m*currCand.area/(480*640) + b))
+                                {
+                                    CandObj tmp;
+                                    tmp.ids.insert(currCand.ids.begin(), currCand.ids.end());
+                                    tmp.ids.insert(testCand.ids.begin(), testCand.ids.end());
+                                    tmp.label = currCand.label;
+                                    //tmp.pm = (currCand.pm + testCand.pm) / 2;
+
+                                    float cWeight = (float)(currCand.ids.size()) / ((float)currCand.ids.size() + testCand.ids.size());
+                                    float tWeight = (float)(testCand.ids.size()) / ((float)currCand.ids.size() + testCand.ids.size());
+                                    tmp.pm = (cWeight * currCand.pm + tWeight * testCand.pm)/(cWeight + tWeight);
+                                    tmp.area = (currCand.area + testCand.area) / 2;
+
+                                    tmp.feature_vector_paths.insert(tmp.feature_vector_paths.end(), currCand.feature_vector_paths.begin(), currCand.feature_vector_paths.end());
+                                    tmp.feature_vector_paths.insert(tmp.feature_vector_paths.end(), testCand.feature_vector_paths.begin(), testCand.feature_vector_paths.end());
+
+                                    string name = currCand.label + to_string(labelCount[currCand.label]);
+                                    string prevName = currCand.label + to_string(labelCount[currCand.label]-1);
+
+                                    //cout << "currcandobj " << currCand.obj << endl;
+                                    //cout << "testcandobj " << testCand.obj << endl;
+                                    if (newCandObjMap.find(prevName) == newCandObjMap.end())
+                                    {
+                                        //cout << prevName << endl;
+                                        newCandObjMap[name] = tmp;
+                                        labelCount[currCand.label]++;
+                                        currCand.obj = name;
+                                        tmp.obj = name;
+                                    }
+                                    else
+                                    {
+                                        map<string, CandObj>::iterator itn = newCandObjMap.begin();
+                                        while(itn != newCandObjMap.end())
+                                        {
+                                            CandObj nco = itn->second;
+                                            string inst = itn->first;
+                                            if (inst == currCand.obj)
+                                            {
+                                                //cout << "inst= " << inst << endl;
+                                                newCandObjMap[currCand.obj] = tmp;
+                                                tmp.obj = inst;
+                                                break;
+                                            }
+                                            itn++;
+                                        }
+
+                                        if (itn == newCandObjMap.end())
+                                        {
+                                            //cout << "fora while = " << name << endl;
+                                            tmp.obj = name;
+                                            newCandObjMap[name] = tmp;
+                                            labelCount[currCand.label]++;
+                                            tmp.obj = name;
+                                            currCand.obj = name;
+                                        }
+                                    }
+
+                                    itt = candObjMap.erase(itt);
+                                    currCand = tmp;
+                                    //k--;
+                                    match = true;
+                                    erased = true;
+                                }
+                            }
+                            if (!erased)
+                            {
+                                //cout << "itt++" << endl;
+                                itt++;
+                            }
+                        }
+                        // if no match was found, the object still exists. just copy.
+                        // (if it's been seen in at least 2 different views)
+                        if (!match)
+                        {
+                            if (currCand.ids.size() > 1)
+                            {
+                                newCandObjMap[currCand.label + to_string(labelCount[currCand.label])] = currCand;
+                                currCand.obj = currCand.label + to_string(labelCount[currCand.label]);
+                                //newCandObjMap[currCand.label + to_string(labelCount[currCand.label])]
+                                labelCount[currCand.label]++;
+                            }
+                        }
+                        match = false;
+                        //cout << "it++" << endl;
+                        it++;
+                    }
+
+
+                    map<string, CandObj>::iterator itnc = newCandObjMap.begin();
+
+                    // final transform to align world axes from ROS and gazebo
+                    Transform c_t(xi, yi, zi, roll, pitch, yaw);
+
+                    std::string result_folder;
+                    result_folder = scene_path + postfix_result;
+
+                    boost::filesystem::create_directory(result_folder);
+
+                    std::ofstream obj_map_file;
+                    obj_map_file.open(result_folder + "/3d_obj_map.txt");
+
+                    while (itnc != newCandObjMap.end())
+                    {
+                        std::string object_name = itnc->first;
+                        if (object_name=="sugar box")
+                            object_name="sugar_box";
+                        //cout << "label " << itnc->first << endl;
+                        //cout << itnc->first << " ";
+                        CandObj obj = itnc->second;
+                        set<int>::iterator its = obj.ids.begin();
+                        //cout << "ids ";
+                        while (its != obj.ids.end())
+                        {
+                            //cout << *its << " ";
+                            its++;
+                        }
+                        Transform q(obj.pm.x, obj.pm.y, obj.pm.z, 0, 0, 0);
+                        Transform r = c_t * q;
+                        obj_map_file << "[" << r.x() << "," << r.y() << "," << r.z() << "]" << ";" << object_name << "\n";
+
+                        //write all feature vector paths to a txt file for each detection to be able to perform matching
+                        std::ofstream obj_fv_file;
+                        obj_fv_file.open(result_folder + "/" + object_name +"_fv_paths.txt");
+                        for (std::string fv_path : obj.feature_vector_paths)
+                            obj_fv_file << fv_path << "\n";
+                        obj_fv_file.close();
+
+                        itnc++;
+                    }
+                    obj_map_file.close();
+
+
+
+                    std::chrono::steady_clock::time_point end_spat= std::chrono::steady_clock::now();
+                    //std::cout << "Time difference spatial association = " <<
+                    //    std::chrono::duration_cast<std::chrono::milliseconds>(end_spat- begin_spat).count()
+                    //    << "[ms]" << std::endl;
+                    //std::cout << "Time difference spatial association = " <<
+                    //    std::chrono::duration_cast<std::chrono::microseconds>(end_spat- begin_spat).count()
+                    //    << "[us]" << std::endl;
+
+
+                    std::chrono::steady_clock::time_point end_total = std::chrono::steady_clock::now();
+                    //std::cout << "Time difference total = " <<
+                    //    std::chrono::duration_cast<std::chrono::milliseconds>(end_total - begin_total).count()
+                    //    << "[ms]" << std::endl;
+
                 }
             }
-            if (!erased)
-            {
-                //cout << "itt++" << endl;
-                itt++;
-            }
         }
-        // if no match was found, the object still exists. just copy.
-        // (if it's been seen in at least 2 different views)
-        if (!match)
-        {
-            if (currCand.ids.size() > 1)
-            {
-                newCandObjMap[currCand.label + to_string(labelCount[currCand.label])] = currCand;
-                currCand.obj = currCand.label + to_string(labelCount[currCand.label]);
-                //newCandObjMap[currCand.label + to_string(labelCount[currCand.label])]
-                labelCount[currCand.label]++;
-            }
-        }
-        match = false;
-        //cout << "it++" << endl;
-        it++;
     }
-
-
-    //cout << "NEWCANDOBJMAP tamanho " << newCandObjMap.size() << endl;
-    map<string, CandObj>::iterator itnc = newCandObjMap.begin();
-
-    // final transform to align world axes from ROS and gazebo
-    Transform t(xi, yi, zi, roll, pitch, yaw);
-
-    std::string result_folder = scene_path + "/baseline_result/";
-    boost::filesystem::create_directory(result_folder);
-
-    std::ofstream obj_map_file;
-    obj_map_file.open(result_folder + "/3d_obj_map.txt");
-
-    while (itnc != newCandObjMap.end())
-    {
-        //cout << "label " << itnc->first << endl;
-        //cout << itnc->first << " ";
-        CandObj obj = itnc->second;
-        set<int>::iterator its = obj.ids.begin();
-        //cout << "ids ";
-        while (its != obj.ids.end())
-        {
-            //cout << *its << " ";
-            its++;
-        }
-        Transform q(obj.pm.x, obj.pm.y, obj.pm.z, 0, 0, 0);
-        Transform r = t * q;
-        obj_map_file << "[" << r.x() << "," << r.y() << "," << r.z() << "]" << ";" << itnc->first << "\n";
-
-        //write all feature vector paths to a txt file for each detection to be able to perform matching
-        std::ofstream obj_fv_file;
-        obj_fv_file.open(result_folder + "/" + itnc->first +"_fv_paths.txt");
-        for (std::string fv_path : obj.feature_vector_paths)
-            obj_fv_file << fv_path << "\n";
-        obj_fv_file.close();
-
-        itnc++;
-    }
-    obj_map_file.close();
-
-
-
-    std::chrono::steady_clock::time_point end_spat= std::chrono::steady_clock::now();
-    //std::cout << "Time difference spatial association = " <<
-    //    std::chrono::duration_cast<std::chrono::milliseconds>(end_spat- begin_spat).count()
-    //    << "[ms]" << std::endl;
-    //std::cout << "Time difference spatial association = " <<
-    //    std::chrono::duration_cast<std::chrono::microseconds>(end_spat- begin_spat).count()
-    //    << "[us]" << std::endl;
-
-    /*
-    map<string, vector<IdPos>>::iterator it3 = labelIdMap.begin();
-    while (it3 != labelIdMap.end())
-    {
-        cout << "label " << it3->first << endl;
-        cout << "id pos " << endl;
-        vector<IdPos> v = it3->second;
-        for (int i = 0; i < v.size(); i++)
-        {
-
-            //cout << v[i].id << " " << v[i].p << endl;
-        }
-        it3++;
-    }
-    */
-
-    std::chrono::steady_clock::time_point end_total = std::chrono::steady_clock::now();
-    //std::cout << "Time difference total = " <<
-    //    std::chrono::duration_cast<std::chrono::milliseconds>(end_total - begin_total).count()
-    //    << "[ms]" << std::endl;
     return 0;
 }
-
-
 
 string getMaxVotedLabel(CandObj& m)
 {
@@ -880,4 +949,117 @@ std::map<int, DetObject> readInputData(std::vector<std::tuple<std::string, std::
         }
     }
     return input_data;
+}
+
+
+std::vector<Plane> convexHullPtsParser(std::string path) {
+    std::vector<Plane> rec_planes;
+    std::ifstream file(path);
+    if (!file.good()) {
+        std::cerr << "File " << path << "does not exist << std::endl";
+        return rec_planes;
+    }
+    std::string str;
+    int plane_cnt = 0;
+    while (std::getline(file, str)) {
+        Plane plane;
+        if (str.rfind("center",0) == 0) {
+            std::getline(file, str);
+            PointXYZ point;
+            std::vector<std::string> split_str;
+            boost::split(split_str, str, boost::is_any_of(":"));
+            point.x = std::stof(split_str[1]);
+
+            std::getline(file, str);
+            boost::split(split_str, str, boost::is_any_of(":"));
+            point.y = std::stof(split_str[1]);
+
+            std::getline(file, str);
+            boost::split(split_str, str, boost::is_any_of(":"));
+            point.z = std::stof(split_str[1]);
+
+            plane.center_point = point;
+            continue;
+        }
+        if (str.rfind("points",0) != 0) {
+            continue;
+        }
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
+        while (std::getline(file, str) && str.rfind("plane", 0) != 0) {
+            boost::trim(str);
+            if (str.rfind("x",0) == 0) {
+                pcl::PointXYZ point;
+                std::vector<std::string> split_str;
+                boost::split(split_str, str, boost::is_any_of(":"));
+                point.x = std::stof(split_str[1]);
+
+                std::getline(file, str);
+                boost::split(split_str, str, boost::is_any_of(":"));
+                point.y = std::stof(split_str[1]);
+
+                std::getline(file, str);
+                boost::split(split_str, str, boost::is_any_of(":"));
+                point.z = std::stof(split_str[1]);
+
+                cloud->points.push_back(point);
+            }
+        }
+        cloud->height=1;
+        cloud->width=cloud->points.size();
+        plane.convex_hull_cloud = cloud;
+
+        //now it is time to parse plane:
+        std::getline(file, str);
+        Vector4f_NotAligned plane_coeffs;
+        std::vector<std::string> split_str;
+        boost::split(split_str, str, boost::is_any_of(":"));
+        plane_coeffs[0] = std::stof(split_str[1]); //x
+
+        std::getline(file, str);
+        boost::split(split_str, str, boost::is_any_of(":"));
+        plane_coeffs[1] = std::stof(split_str[1]); //y
+
+        std::getline(file, str);
+        boost::split(split_str, str, boost::is_any_of(":"));
+        plane_coeffs[2] = std::stof(split_str[1]); //z
+
+        std::getline(file, str);
+        boost::split(split_str, str, boost::is_any_of(":"));
+        plane_coeffs[3] = std::stof(split_str[1]); //d
+
+        plane.plane_coeffs = plane_coeffs;
+
+        rec_planes.push_back(plane);
+    }
+    return rec_planes;
+}
+
+//WARNING: there is probably a bug. Returns always false!
+bool isDetObjectOnPlane(std::vector<Plane> planes, Point3d object_point) {
+    for (Plane plane : planes) {
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_hull (new pcl::PointCloud<pcl::PointXYZ>);
+        std::vector<pcl::Vertices> polygons;
+        pcl::ConvexHull<pcl::PointXYZ> chull;
+        chull.setInputCloud (plane.convex_hull_cloud);
+        chull.setDimension(2);
+        chull.reconstruct (*cloud_hull, polygons);
+
+        pcl::PointCloud<pcl::PointXYZ>::Ptr obj_point_cloud (new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointXYZ p{object_point.x, object_point.y, object_point.z};
+        obj_point_cloud->points.push_back(p);
+
+        pcl::PointCloud<pcl::PointXYZ>::Ptr intersection_cloud (new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::CropHull<pcl::PointXYZ> crop_filter;
+        crop_filter.setInputCloud (obj_point_cloud);
+        crop_filter.setHullCloud (cloud_hull);
+        crop_filter.setHullIndices (polygons);
+        crop_filter.setDim (2);
+        crop_filter.filter (*intersection_cloud);
+
+        if (!intersection_cloud->empty()) {
+            if (object_point.z > plane.center_point.z)
+                return true;
+        }
+    }
+    return false;
 }

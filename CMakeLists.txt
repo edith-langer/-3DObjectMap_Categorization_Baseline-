@@ -21,7 +21,7 @@ find_package(PCL REQUIRED)
 include_directories("${PROJECT_SOURCE_DIR}/include")
 
 add_executable(3d_obj_map src/ObjectMap.cpp src/Transform.cpp)
-TARGET_LINK_LIBRARIES(3d_obj_map ${OpenCV_LIBS} Boost::program_options Boost::filesystem Eigen3::Eigen)
+TARGET_LINK_LIBRARIES(3d_obj_map ${PCL_LIBRARIES} ${OpenCV_LIBS} Boost::program_options Boost::filesystem Eigen3::Eigen)
 
 add_executable(scene_comparison src/SceneComparisons.cpp)
 TARGET_LINK_LIBRARIES(scene_comparison ${OpenCV_LIBS} Boost::program_options Boost::filesystem Eigen3::Eigen)
